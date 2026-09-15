@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#07111f">
+  <title>BlueEdge • Polymarket 15M Trader</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark">B</span><div><b>BlueEdge</b><small>Prediction Terminal</small></div></div>
+      <nav>
+        <button class="nav active" data-page="dashboard">⌂ <span>Dashboard</span></button>
+        <button class="nav" data-page="markets">◈ <span>Live Markets</span></button>
+        <button class="nav" data-page="strategy">⚙ <span>Strategy</span></button>
+        <button class="nav" data-page="backtest">▥ <span>Backtest</span></button>
+        <button class="nav" data-page="trades">↗ <span>Trades</span></button>
+        <button class="nav" data-page="settings">☰ <span>Settings</span></button>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="mode-pill"><i></i><span id="connectionText">Public data connected</span></div>
+        <small>GitHub Pages build • paper execution</small>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div><div class="eyebrow">LIVE PREDICTION ENGINE</div><h1 id="pageTitle">Dashboard</h1></div>
+        <div class="top-actions">
+          <span class="clock" id="clock">--:--:--</span>
+          <button class="outline" id="refreshBtn">Refresh</button>
+          <button class="primary" id="botToggle">Start Paper Trader</button>
+        </div>
+      </header>
+
+      <section id="page-dashboard" class="page active">
+        <div class="hero-grid">
+          <div class="hero-card">
+            <div class="hero-top"><div><span class="label">PAPER PORTFOLIO</span><strong id="balance">$10,000.00</strong></div><span class="status blue">SIMULATION</span></div>
+            <div class="metrics">
+              <div><span>Today P/L</span><b id="pnl">$0.00</b></div>
+              <div><span>Trades</span><b id="tradeCount">0</b></div>
+              <div><span>Win rate</span><b id="winRate">—</b></div>
+            </div>
+          </div>
+          <div class="hero-card bot-card">
+            <div class="hero-top"><div><span class="label">AUTO TRADER</span><strong id="botState">STOPPED</strong></div><div class="switch off" id="botSwitch"><span></span></div></div>
+            <p id="botMessage">Paper trading only. No private keys are stored by this static site.</p>
+            <button class="primary wide" id="botToggle2">Start Paper Trader</button>
+          </div>
+        </div>
+
+        <div class="section-head"><div><span class="eyebrow">SIGNAL BOARD</span><h2>15-minute crypto markets</h2></div><button class="ghost" data-page="markets">View all →</button></div>
+        <div id="marketCards" class="market-grid"></div>
+      </section>
+
+      <section id="page-markets" class="page">
+        <div class="toolbar">
+          <div><span class="eyebrow">POLYMARKET + BINANCE</span><h2>Live market scanner</h2></div>
+          <div class="filters">
+            <select id="assetFilter"><option value="ALL">All crypto</option><option>BTC</option><option>ETH</option><option>SOL</option></select>
+            <select id="timeFilter"><option value="15">15 minutes</option><option value="5">5 minutes</option><option value="60">1 hour</option></select>
+          </div>
+        </div>
+        <div class="data-note">Public Polymarket market data and public Binance market streams are used. Market availability depends on what Polymarket currently lists.</div>
+        <div id="marketTable" class="table-card"></div>
+      </section>
+
+      <section id="page-strategy" class="page">
+        <div class="toolbar"><div><span class="eyebrow">RULE ENGINE</span><h2>Strategy Builder</h2></div><button class="primary" id="saveStrategy">Save strategy</button></div>
+        <div class="form-grid">
+          <div class="panel">
+            <h3>Market</h3>
+            <label>Timeframe<select id="sTime"><option value="15">15 minutes</option><option value="5">5 minutes</option><option value="60">1 hour</option></select></label>
+            <label>Assets<div class="chips"><button class="chip selected" data-asset="BTC">BTC</button><button class="chip selected" data-asset="ETH">ETH</button><button class="chip" data-asset="SOL">SOL</button></div></label>
+            <label>Max entry price <output id="entryOut">0.55</output><input id="entry" type="range" min=".05" max=".95" step=".01" value=".55"></label>
+          </div>
+          <div class="panel">
+            <h3>Signal requirements</h3>
+            <label>Minimum model probability <output id="probOut">65%</output><input id="prob" type="range" min="50" max="95" value="65"></label>
+            <label>Minimum edge <output id="edgeOut">12%</output><input id="edge" type="range" min="1" max="40" value="12"></label>
+            <label>Minimum signal score <output id="scoreOut">70</output><input id="score" type="range" min="50" max="95" value="70"></label>
+          </div>
+          <div class="panel">
+            <h3>Exit</h3>
+            <label>Target price <output id="targetOut">0.72</output><input id="target" type="range" min=".55" max=".99" step=".01" value=".72"></label>
+            <label>Stop price <output id="stopOut">0.38</output><input id="stop" type="range" min=".05" max=".65" step=".01" value=".38"></label>
+            <label>Seconds before expiry to stop entries<input id="cutoff" type="number" min="0" max="900" value="60"></label>
+          </div>
+          <div class="panel">
+            <h3>Risk</h3>
+            <label>Risk per trade <output id="riskOut">1%</output><input id="risk" type="range" min=".25" max="5" step=".25" value="1"></label>
+            <label>Daily loss limit <output id="dailyOut">3%</output><input id="daily" type="range" min="1" max="20" value="3"></label>
+            <label>Max open trades<input id="maxTrades" type="number" min="1" max="20" value="2"></label>
+          </div>
+        </div>
+        <div class="panel strategy-preview"><h3>Decision preview</h3><pre id="strategyPreview"></pre></div>
+      </section>
+
+      <section id="page-backtest" class="page">
+        <div class="toolbar"><div><span class="eyebrow">RESEARCH MODE</span><h2>Backtest calculator</h2></div><button class="primary" id="runBacktest">Run simulation</button></div>
+        <div class="panel"><p class="muted">This browser-only build uses a deterministic simulated sample so the interface works on GitHub Pages. It does not pretend that simulated results are historical performance.</p></div>
+        <div id="backtestResults" class="stat-grid"></div>
+        <div class="panel chart-panel"><canvas id="equityCanvas" height="260"></canvas></div>
+      </section>
+
+      <section id="page-trades" class="page">
+        <div class="toolbar"><div><span class="eyebrow">EXECUTION LOG</span><h2>Paper trades</h2></div><button class="ghost" id="clearTrades">Clear local trades</button></div>
+        <div id="tradesTable" class="table-card"></div>
+      </section>
+
+      <section id="page-settings" class="page">
+        <div class="toolbar"><div><span class="eyebrow">ACCOUNT</span><h2>Settings</h2></div></div>
+        <div class="form-grid">
+          <div class="panel">
+            <h3>Trader profile</h3>
+            <label>Display name<input id="displayName" placeholder="Trader"></label>
+            <label>Paper starting balance<input id="startBalance" type="number" min="100" step="100" value="10000"></label>
+            <label>Data refresh seconds<input id="refreshSeconds" type="number" min="10" max="300" value="30"></label>
+          </div>
+          <div class="panel">
+            <h3>Execution safety</h3>
+            <div class="notice"><b>Live execution is intentionally disabled.</b><br>GitHub Pages is a static client. Never put Polymarket private keys, signing secrets, or exchange secrets in browser code.</div>
+            <label class="check"><input type="checkbox" id="confirmPaper" checked> Require confirmation before paper orders</label>
+            <button class="danger" id="resetAll">Reset local app data</button>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script src="data.js"></script>
+  <script src="strategy.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
