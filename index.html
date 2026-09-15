@@ -2,134 +2,288 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="theme-color" content="#07111f">
-  <title>BlueEdge • Polymarket 15M Trader</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#071426">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="mobile-web-app-capable" content="yes">
+  <title>BlueEdge · Polymarket crypto trader</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <div class="app-shell">
-    <aside class="sidebar">
-      <div class="brand"><span class="brand-mark">B</span><div><b>BlueEdge</b><small>Prediction Terminal</small></div></div>
-      <nav>
-        <button class="nav active" data-page="dashboard">⌂ <span>Dashboard</span></button>
-        <button class="nav" data-page="markets">◈ <span>Live Markets</span></button>
-        <button class="nav" data-page="strategy">⚙ <span>Strategy</span></button>
-        <button class="nav" data-page="backtest">▥ <span>Backtest</span></button>
-        <button class="nav" data-page="trades">↗ <span>Trades</span></button>
-        <button class="nav" data-page="settings">☰ <span>Settings</span></button>
+  <div class="shell">
+    <aside class="rail">
+      <a class="brand" href="#home" aria-label="BlueEdge home">
+        <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 18 11 6l3 5 2-3 4 10z"/></svg></span>
+        <span class="brand-text"><b>BlueEdge</b><small>Polymarket crypto trader</small></span>
+      </a>
+      <nav class="nav" aria-label="Main">
+        <a href="#home"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11.5 12 4l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg><span>Home</span></a>
+        <a href="#markets"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V9m5 10V5m5 14v-7m5 7V8"/></svg><span>Markets</span></a>
+        <a href="#strategy"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10m4 0h2M4 17h4m4 0h8M14 4v6M8 14v6"/></svg><span>Strategy</span></a>
+        <a href="#trades"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h12v18l-3-2-3 2-3-2-3 2zM9 8h6m-6 4h6m-6 4h3"/></svg><span>Trades</span></a>
+        <a href="#settings"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3M4.9 4.9l2.1 2.1m10 10 2.1 2.1M4.9 19.1 7 17m10-10 2.1-2.1"/></svg><span>Settings</span></a>
       </nav>
-      <div class="sidebar-foot">
-        <div class="mode-pill"><i></i><span id="connectionText">Public data connected</span></div>
-        <small>GitHub Pages build • paper execution</small>
+      <div class="rail-status">
+        <p><i class="dot" data-dot="gamma"></i>Polymarket markets</p>
+        <p><i class="dot" data-dot="poly"></i>Polymarket prices</p>
+        <p><i class="dot" data-dot="binance"></i>Binance feed</p>
       </div>
     </aside>
 
+    <header class="topbar">
+      <div class="topbar-title">
+        <span class="brand-mark small" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 18 11 6l3 5 2-3 4 10z"/></svg></span>
+        <h1 id="pageTitle">Home</h1>
+      </div>
+      <div class="topbar-actions">
+        <a class="conn" href="#settings" id="connPill" aria-label="Connection status"><i class="dot" id="connDot"></i><span id="connText">Connecting</span></a>
+        <button class="bot-switch" data-bot-toggle aria-pressed="false"><span class="knob"></span><span class="lbl">Bot off</span></button>
+      </div>
+    </header>
+
     <main class="main">
-      <header class="topbar">
-        <div><div class="eyebrow">LIVE PREDICTION ENGINE</div><h1 id="pageTitle">Dashboard</h1></div>
-        <div class="top-actions">
-          <span class="clock" id="clock">--:--:--</span>
-          <button class="outline" id="refreshBtn">Refresh</button>
-          <button class="primary" id="botToggle">Start Paper Trader</button>
-        </div>
-      </header>
+      <!-- HOME -->
+      <section data-view="home">
+        <div class="home-top">
+          <article class="panel account">
+            <p class="muted-label">Paper equity</p>
+            <p class="equity" id="equity">$10,000.00</p>
+            <p class="equity-sub"><span id="totalPnl">+$0.00</span> all time</p>
+            <dl class="stats">
+              <div><dt>Cash</dt><dd id="cash">$10,000.00</dd></div>
+              <div><dt>Today</dt><dd id="dayPnl">$0.00</dd></div>
+              <div><dt>Win rate</dt><dd id="winRate">—</dd></div>
+              <div><dt>Open</dt><dd id="openCount">0</dd></div>
+            </dl>
+          </article>
 
-      <section id="page-dashboard" class="page active">
-        <div class="hero-grid">
-          <div class="hero-card">
-            <div class="hero-top"><div><span class="label">PAPER PORTFOLIO</span><strong id="balance">$10,000.00</strong></div><span class="status blue">SIMULATION</span></div>
-            <div class="metrics">
-              <div><span>Today P/L</span><b id="pnl">$0.00</b></div>
-              <div><span>Trades</span><b id="tradeCount">0</b></div>
-              <div><span>Win rate</span><b id="winRate">—</b></div>
+          <article class="panel bot">
+            <div class="bot-head">
+              <div>
+                <h2 id="botTitle">Paper bot is off</h2>
+                <p class="bot-note" id="botNote">Turn it on to trade your strategy with paper money.</p>
+              </div>
+              <button class="bot-switch big" data-bot-toggle aria-pressed="false" aria-label="Toggle paper bot"><span class="knob"></span></button>
             </div>
-          </div>
-          <div class="hero-card bot-card">
-            <div class="hero-top"><div><span class="label">AUTO TRADER</span><strong id="botState">STOPPED</strong></div><div class="switch off" id="botSwitch"><span></span></div></div>
-            <p id="botMessage">Paper trading only. No private keys are stored by this static site.</p>
-            <button class="primary wide" id="botToggle2">Start Paper Trader</button>
-          </div>
+            <div class="quick-risk">
+              <p class="field-title">Stake per trade</p>
+              <div class="money" data-money="risk">
+                <label class="money-field"><input type="text" inputmode="decimal" data-m="pct" aria-label="Stake as percent of equity"><span>%</span></label>
+                <span class="money-eq" aria-hidden="true">=</span>
+                <label class="money-field"><span>$</span><input type="text" inputmode="decimal" data-m="usd" aria-label="Stake in dollars"></label>
+              </div>
+              <p class="hint" data-hint="risk"></p>
+            </div>
+          </article>
         </div>
 
-        <div class="section-head"><div><span class="eyebrow">SIGNAL BOARD</span><h2>15-minute crypto markets</h2></div><button class="ghost" data-page="markets">View all →</button></div>
-        <div id="marketCards" class="market-grid"></div>
-      </section>
-
-      <section id="page-markets" class="page">
-        <div class="toolbar">
-          <div><span class="eyebrow">POLYMARKET + BINANCE</span><h2>Live market scanner</h2></div>
-          <div class="filters">
-            <select id="assetFilter"><option value="ALL">All crypto</option><option>BTC</option><option>ETH</option><option>SOL</option></select>
-            <select id="timeFilter"><option value="15">15 minutes</option><option value="5">5 minutes</option><option value="60">1 hour</option></select>
-          </div>
+        <div class="block" id="homePositionsBlock" hidden>
+          <div class="block-head"><h2>Your open positions</h2><a class="link" href="#trades">All trades</a></div>
+          <div class="pos-list" id="homePositions"></div>
         </div>
-        <div class="data-note">Public Polymarket market data and public Binance market streams are used. Market availability depends on what Polymarket currently lists.</div>
-        <div id="marketTable" class="table-card"></div>
+
+        <div class="block">
+          <div class="block-head">
+            <h2>Live now</h2>
+            <a class="link" href="#markets">All markets</a>
+          </div>
+          <div class="chips" data-chips="homeTf" role="group" aria-label="Timeframe">
+            <button data-v="all">All</button><button data-v="5">5 min</button><button data-v="15">15 min</button><button data-v="60">1 hour</button>
+          </div>
+          <div class="market-grid" id="homeMarkets"></div>
+        </div>
       </section>
 
-      <section id="page-strategy" class="page">
-        <div class="toolbar"><div><span class="eyebrow">RULE ENGINE</span><h2>Strategy Builder</h2></div><button class="primary" id="saveStrategy">Save strategy</button></div>
+      <!-- MARKETS -->
+      <section data-view="markets" hidden>
+        <div class="page-head">
+          <div>
+            <h2>Crypto Up or Down markets</h2>
+            <p class="muted" id="marketsCaption">Every live 5 min, 15 min and 1 hour crypto market on Polymarket, found automatically.</p>
+          </div>
+          <button class="btn ghost" data-action="refresh">Refresh</button>
+        </div>
+        <div class="filter-bar">
+          <div class="seg" data-chips="marketsWhen" role="group" aria-label="When"><button data-v="live">Live now</button><button data-v="next">Up next</button></div>
+          <div class="chips" data-chips="marketsTf" role="group" aria-label="Timeframe">
+            <button data-v="all">All</button><button data-v="5">5 min</button><button data-v="15">15 min</button><button data-v="60">1 hour</button>
+          </div>
+          <label class="select"><span>Sort</span>
+            <select id="sortSelect">
+              <option value="ready">Ready first</option>
+              <option value="ending">Ending soonest</option>
+              <option value="liquidity">Most liquidity</option>
+              <option value="asset">Coin</option>
+            </select>
+          </label>
+        </div>
+        <div class="market-grid" id="allMarkets"></div>
+      </section>
+
+      <!-- STRATEGY -->
+      <section data-view="strategy" hidden>
+        <div class="page-head">
+          <div>
+            <h2 class="dup">Strategy</h2>
+            <p class="muted">Changes save instantly and apply to the bot right away.</p>
+          </div>
+          <span class="saved" id="savedNote" aria-live="polite"></span>
+        </div>
+
         <div class="form-grid">
-          <div class="panel">
-            <h3>Market</h3>
-            <label>Timeframe<select id="sTime"><option value="15">15 minutes</option><option value="5">5 minutes</option><option value="60">1 hour</option></select></label>
-            <label>Assets<div class="chips"><button class="chip selected" data-asset="BTC">BTC</button><button class="chip selected" data-asset="ETH">ETH</button><button class="chip" data-asset="SOL">SOL</button></div></label>
-            <label>Max entry price <output id="entryOut">0.55</output><input id="entry" type="range" min=".05" max=".95" step=".01" value=".55"></label>
-          </div>
-          <div class="panel">
-            <h3>Signal requirements</h3>
-            <label>Minimum model probability <output id="probOut">65%</output><input id="prob" type="range" min="50" max="95" value="65"></label>
-            <label>Minimum edge <output id="edgeOut">12%</output><input id="edge" type="range" min="1" max="40" value="12"></label>
-            <label>Minimum signal score <output id="scoreOut">70</output><input id="score" type="range" min="50" max="95" value="70"></label>
-          </div>
-          <div class="panel">
+          <article class="panel">
+            <h3>Which markets</h3>
+            <p class="field-title">Timeframes</p>
+            <div class="toggles" role="group" aria-label="Timeframes">
+              <button data-tf="5" aria-pressed="true">5 min</button>
+              <button data-tf="15" aria-pressed="true">15 min</button>
+              <button data-tf="60" aria-pressed="true">1 hour</button>
+            </div>
+            <p class="hint">Coins aren't picked by hand. Every crypto market Polymarket lists on these timeframes is scanned.</p>
+
+            <div class="row2">
+              <label class="field"><span>Min liquidity</span><div class="affix"><em>$</em><input type="text" inputmode="numeric" data-s="minLiquidity"></div></label>
+              <label class="field"><span>Max spread</span><div class="affix"><input type="text" inputmode="decimal" data-s="maxSpread" data-unit="cents"><em>¢</em></div></label>
+            </div>
+          </article>
+
+          <article class="panel">
+            <h3>Entry</h3>
+            <p class="field-title">Side to buy</p>
+            <div class="seg wrap" data-seg="side" role="group" aria-label="Side to buy">
+              <button data-v="follow">Follow Binance</button><button data-v="up">Always Up</button><button data-v="down">Always Down</button><button data-v="cheaper">Cheaper side</button>
+            </div>
+            <p class="hint" id="sideHint"></p>
+            <div class="row2">
+              <label class="field"><span>Pay at least</span><div class="affix"><input type="text" inputmode="decimal" data-s="minPrice" data-unit="cents"><em>¢</em></div></label>
+              <label class="field"><span>Pay at most</span><div class="affix"><input type="text" inputmode="decimal" data-s="maxPrice" data-unit="cents"><em>¢</em></div></label>
+            </div>
+            <div class="row2">
+              <label class="field"><span>Wait after open</span><div class="affix"><input type="text" inputmode="numeric" data-s="skipFirst"><em>sec</em></div></label>
+              <label class="field"><span>Stop with time left</span><div class="affix"><input type="text" inputmode="numeric" data-s="stopBefore"><em>sec</em></div></label>
+            </div>
+          </article>
+
+          <article class="panel">
             <h3>Exit</h3>
-            <label>Target price <output id="targetOut">0.72</output><input id="target" type="range" min=".55" max=".99" step=".01" value=".72"></label>
-            <label>Stop price <output id="stopOut">0.38</output><input id="stop" type="range" min=".05" max=".65" step=".01" value=".38"></label>
-            <label>Seconds before expiry to stop entries<input id="cutoff" type="number" min="0" max="900" value="60"></label>
-          </div>
-          <div class="panel">
+            <div class="seg" data-seg="exit" role="group" aria-label="Exit">
+              <button data-v="hold">Hold to close</button><button data-v="tpsl">Take profit / stop</button>
+            </div>
+            <div class="row2" id="tpslFields">
+              <label class="field"><span>Take profit at</span><div class="affix"><input type="text" inputmode="decimal" data-s="takeProfit" data-unit="cents"><em>¢</em></div></label>
+              <label class="field"><span>Stop loss at</span><div class="affix"><input type="text" inputmode="decimal" data-s="stopLoss" data-unit="cents"><em>¢</em></div></label>
+            </div>
+            <p class="hint">Positions left open settle at $1 per share if your side wins and $0 if it loses, using Polymarket's official result.</p>
+          </article>
+
+          <article class="panel">
             <h3>Risk</h3>
-            <label>Risk per trade <output id="riskOut">1%</output><input id="risk" type="range" min=".25" max="5" step=".25" value="1"></label>
-            <label>Daily loss limit <output id="dailyOut">3%</output><input id="daily" type="range" min="1" max="20" value="3"></label>
-            <label>Max open trades<input id="maxTrades" type="number" min="1" max="20" value="2"></label>
-          </div>
+            <p class="field-title">Stake per trade</p>
+            <div class="money" data-money="risk">
+              <label class="money-field"><input type="text" inputmode="decimal" data-m="pct" aria-label="Stake as percent of equity"><span>%</span></label>
+              <span class="money-eq" aria-hidden="true">=</span>
+              <label class="money-field"><span>$</span><input type="text" inputmode="decimal" data-m="usd" aria-label="Stake in dollars"></label>
+            </div>
+            <p class="hint" data-hint="risk"></p>
+
+            <p class="field-title">Daily loss limit</p>
+            <div class="money" data-money="daily">
+              <label class="money-field"><input type="text" inputmode="decimal" data-m="pct" aria-label="Daily loss limit as percent"><span>%</span></label>
+              <span class="money-eq" aria-hidden="true">=</span>
+              <label class="money-field"><span>$</span><input type="text" inputmode="decimal" data-m="usd" aria-label="Daily loss limit in dollars"></label>
+            </div>
+            <p class="hint" data-hint="daily"></p>
+
+            <p class="field-title">Max open positions</p>
+            <div class="stepper">
+              <button data-step="-1" aria-label="Fewer">−</button>
+              <input type="text" inputmode="numeric" data-s="maxOpen" aria-label="Max open positions">
+              <button data-step="1" aria-label="More">+</button>
+            </div>
+          </article>
         </div>
-        <div class="panel strategy-preview"><h3>Decision preview</h3><pre id="strategyPreview"></pre></div>
+
+        <article class="panel summary">
+          <h3>In plain English</h3>
+          <ul id="strategySummary"></ul>
+        </article>
       </section>
 
-      <section id="page-backtest" class="page">
-        <div class="toolbar"><div><span class="eyebrow">RESEARCH MODE</span><h2>Backtest calculator</h2></div><button class="primary" id="runBacktest">Run simulation</button></div>
-        <div class="panel"><p class="muted">This browser-only build uses a deterministic simulated sample so the interface works on GitHub Pages. It does not pretend that simulated results are historical performance.</p></div>
-        <div id="backtestResults" class="stat-grid"></div>
-        <div class="panel chart-panel"><canvas id="equityCanvas" height="260"></canvas></div>
+      <!-- TRADES -->
+      <section data-view="trades" hidden>
+        <div class="page-head">
+          <div><h2 class="dup">Trades</h2><p class="muted">Paper positions, settled with Polymarket's real results.</p></div>
+        </div>
+        <dl class="stat-row">
+          <div><dt>Realized P/L</dt><dd id="tRealized">$0.00</dd></div>
+          <div><dt>Win rate</dt><dd id="tWinRate">—</dd></div>
+          <div><dt>Settled trades</dt><dd id="tCount">0</dd></div>
+          <div><dt>Fees paid</dt><dd id="tFees">$0.00</dd></div>
+        </dl>
+        <article class="panel chart">
+          <div class="block-head"><h3>Equity</h3></div>
+          <canvas id="equityCanvas" aria-label="Equity curve"></canvas>
+          <p class="empty small" id="chartEmpty">Your equity curve appears after your first closed trade.</p>
+        </article>
+        <div class="block">
+          <div class="block-head"><h2>Open</h2></div>
+          <div class="pos-list" id="openPositions"></div>
+        </div>
+        <div class="block">
+          <div class="block-head"><h2>History</h2><button class="btn ghost small" id="exportBtn">Export CSV</button></div>
+          <div class="history" id="history"></div>
+        </div>
       </section>
 
-      <section id="page-trades" class="page">
-        <div class="toolbar"><div><span class="eyebrow">EXECUTION LOG</span><h2>Paper trades</h2></div><button class="ghost" id="clearTrades">Clear local trades</button></div>
-        <div id="tradesTable" class="table-card"></div>
-      </section>
-
-      <section id="page-settings" class="page">
-        <div class="toolbar"><div><span class="eyebrow">ACCOUNT</span><h2>Settings</h2></div></div>
+      <!-- SETTINGS -->
+      <section data-view="settings" hidden>
+        
         <div class="form-grid">
-          <div class="panel">
-            <h3>Trader profile</h3>
-            <label>Display name<input id="displayName" placeholder="Trader"></label>
-            <label>Paper starting balance<input id="startBalance" type="number" min="100" step="100" value="10000"></label>
-            <label>Data refresh seconds<input id="refreshSeconds" type="number" min="10" max="300" value="30"></label>
-          </div>
-          <div class="panel">
-            <h3>Execution safety</h3>
-            <div class="notice"><b>Live execution is intentionally disabled.</b><br>GitHub Pages is a static client. Never put Polymarket private keys, signing secrets, or exchange secrets in browser code.</div>
-            <label class="check"><input type="checkbox" id="confirmPaper" checked> Require confirmation before paper orders</label>
-            <button class="danger" id="resetAll">Reset local app data</button>
-          </div>
+          <article class="panel">
+            <h3>Paper account</h3>
+            <label class="field"><span>Your name</span><input type="text" id="nameInput" placeholder="Trader" autocomplete="nickname"></label>
+            <label class="field"><span>Starting balance</span><div class="affix"><em>$</em><input type="text" inputmode="decimal" id="startInput"></div></label>
+            <button class="btn" id="resetAccount">Reset account to this balance</button>
+            <p class="hint">Clears paper trades and sets cash back to the starting balance.</p>
+          </article>
+
+          <article class="panel">
+            <h3>Bot</h3>
+            <p class="field-title">When the bot finds a match</p>
+            <div class="seg" data-seg="botMode" role="group" aria-label="Bot mode">
+              <button data-v="auto">Trade automatically</button><button data-v="ask">Ask me first</button>
+            </div>
+            <p class="hint">The bot runs while this page is open. If BlueEdge is open in several tabs, only one of them trades.</p>
+            <label class="field"><span>Check for new markets every</span>
+              <select id="refreshSelect"><option value="30">30 seconds</option><option value="60">1 minute</option><option value="120">2 minutes</option><option value="300">5 minutes</option></select>
+            </label>
+            <p class="hint">Prices stream live either way. Markets also refresh as soon as a window rolls over.</p>
+          </article>
+
+          <article class="panel">
+            <h3>Connections</h3>
+            <ul class="conn-list" id="connList"></ul>
+            <button class="btn ghost" data-action="refresh">Refresh markets now</button>
+          </article>
+
+          <article class="panel">
+            <h3>Safety</h3>
+            <p class="notice">This build places paper trades only. GitHub Pages can't keep secrets, so never paste a private key, seed phrase or API secret into this site.</p>
+            <button class="btn danger" id="resetAll">Erase all BlueEdge data on this device</button>
+          </article>
         </div>
       </section>
     </main>
   </div>
+
+  <div class="backdrop" id="backdrop"></div>
+  <div class="sheet" id="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle"></div>
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+
   <script src="data.js"></script>
   <script src="strategy.js"></script>
   <script src="app.js"></script>
