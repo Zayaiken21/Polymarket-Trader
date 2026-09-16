@@ -42,14 +42,14 @@ window.BlueEdgeStrategy = (() => {
     if (!s.timeframes.includes(m.tf)) return done(`${tfName(m.tf)} markets are off`);
     if (left <= 0) return done("Window closed");
     if (elapsed < 0) return done(`Opens in ${secs(-elapsed)}`);
-    if (ctx.open == null || ctx.spot == null) return done("Waiting for the Binance window open");
-    if (ctx.spot === ctx.open) return done("Binance is flat vs. the window open");
+    if (ctx.open == null || ctx.spot == null) return done("Waiting for the price to beat");
+    if (ctx.spot === ctx.open) return done("Price is exactly at the price to beat");
     const side = ctx.spot > ctx.open ? "Up" : "Down";
     const book = side === "Up" ? ctx.up : ctx.down;
     const ask = book.ask, bid = book.bid;
     const checks = [];
     const add = (label, pass, why) => checks.push({ label, pass, why });
-    add(`Binance is ${side === "Up" ? "above" : "below"} the window open`, true, "");
+    add(`Live price is ${side === "Up" ? "above" : "below"} the price to beat`, true, "");
     add(`At least ${secs(R.skipFirst)} into the window`, elapsed >= R.skipFirst, `Entries open in ${secs(R.skipFirst - elapsed)}`);
     add(`At least ${secs(R.stopBefore)} left`, left >= R.stopBefore, "Too close to the close for new entries");
     add(`${side} costs ${cents(R.minPrice)}–${cents(R.maxPrice)}`, ask != null && ask >= R.minPrice && ask <= R.maxPrice,
@@ -62,7 +62,7 @@ window.BlueEdgeStrategy = (() => {
   }
 
   const rulesText = () => [
-    `Buys the side Binance is moving toward since the window opened.`,
+    `Buys Up when the live price is above the price to beat and Down when it is below (Chainlink for 5 and 15 minute markets, Binance for markets that resolve on Binance).`,
     `Only enters ${secs(RULES.skipFirst)} after a window opens and stops with ${secs(RULES.stopBefore)} left.`,
     `Only pays ${cents(RULES.minPrice)}–${cents(RULES.maxPrice)} per share with a spread of ${cents(RULES.maxSpread)} or less.`,
     `Live orders are market orders capped at ${cents(RULES.slippage)} above the current price, so they never fill worse than that.`,

@@ -18,6 +18,27 @@ A static GitHub Pages app for Polymarket's 5 min, 15 min and 1 hour crypto **Up 
 
 Both libraries are vendored, so no third-party scripts load at runtime.
 
+## What's new in 3.2.0
+
+- **Accounts:** save as many live accounts as you like. Each one is encrypted on the device with its own passcode, and "Save all to file" / "Load file" move them as a single JSON file.
+- **L1 and L2:**
+  - L1 is the signer private key. It signs orders and is required to trade.
+  - L2 is the CLOB API key, secret and passphrase. On its own it gives a read-only account: balance, open orders, fills and cancels.
+- **Check balance and connection** tests your account (limited to once every 15 seconds):
+  - Signer key
+  - L2 authentication
+  - Balance
+  - Close-only mode
+  - Trading approvals
+  - Order stream
+  - Region
+- **Price to beat:** comes from Polymarket's Chainlink feed, the price 5 and 15 minute markets resolve on. Markets that resolve on Binance use Binance.
+- **Settlement:** uses the official CLOB market result first, then Gamma, then an estimate from Chainlink or Binance after 90 seconds, then a refund after 20 minutes. Trades never stay stuck on "Settling".
+- **Markets → Resolved** shows how recent windows ended.
+- **Quiet order books** get a REST refresh.
+- **Mobile:** pinch-zoom and sideways scrolling are blocked outside the chart.
+- **Bot switch:** there's now one, in the bot card on Home.
+
 ## Connecting a live account
 
 Settings → Connect a Polymarket account:

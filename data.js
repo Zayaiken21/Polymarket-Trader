@@ -6,6 +6,7 @@
 window.BlueEdgeData = (() => {
   const GAMMA = "https://gamma-api.polymarket.com";
   const CLOB_WS = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
+  const CLOB_REST = "https://clob.polymarket.com";
   const BINANCE_HOSTS = [
     "wss://data-stream.binance.vision/stream",
     "wss://stream.binance.com:9443/stream",
@@ -24,10 +25,13 @@ window.BlueEdgeData = (() => {
     markets: new Map(),   // conditionId -> market
     books: {},            // tokenId -> { bid, ask, last, ts, src }
     spot: {},             // asset -> { price, ts }
-    opens: {},            // "BTC:15:startMs" -> open price
+    opens: {},            // "BTC:15:startMs" -> Binance open
+    closes: {},           // "BTC:15:startMs" -> Binance final close
+    chainlink: {},        // asset -> { price, ts } from Polymarket RTDS (the resolution feed)
+    resolutions: {},      // conditionId -> { winner: "Up"|"Down", source, official }
     status: {
       gamma: "idle", gammaMsg: "", lastDiscovery: 0, requestLog: [],
-      poly: "offline", polyTokens: 0,
+      poly: "offline", polyTokens: 0, chainlink: "offline",
       binance: "offline", binanceHost: ""
     }
   };
@@ -70,8 +74,8 @@ window.BlueEdgeData = (() => {
   }
 
   const cache = new Map();
-  async function gamma(path, ttlMs = 0) {
-    const url = GAMMA + path;
+  async function gamma(path, ttlMs = 0, base = GAMMA) {
+    const url = base + path;
     const hit = cache.get(url);
     if (ttlMs && hit && Date.now() - hit.t < ttlMs) return hit.v;
     return schedule(async () => {
@@ -164,6 +168,7 @@ window.BlueEdgeData = (() => {
       feeRate: rate ?? 0,
       minShares: num(m.orderMinSize) || 5,
       seriesSlug: ev?.series?.[0]?.slug || ev.seriesSlug || "",
+      resolutionSource: String(m.resolutionSource || ev.resolutionSource || "").toLowerCase(),
       url: `https://polymarket.com/event/${ev.slug || m.slug}`,
       snap: { bid: num(m.bestBid), ask: num(m.bestAsk), mid: num(parseArr(m.outcomePrices)[upIdx]) }
     };
@@ -241,7 +246,7 @@ window.BlueEdgeData = (() => {
       try { localStorage.setItem(SERIES_KEY, JSON.stringify([...learnedSeries].slice(-150))); } catch {}
 
       for (const [id, m] of found) { state.markets.set(id, { ...(state.markets.get(id) || {}), ...m }); seedBook(m); }
-      for (const [id, m] of state.markets) if (m.end < Date.now() - 10 * 60000) state.markets.delete(id);
+      for (const [id, m] of state.markets) if (m.end < Date.now() - 40 * 60000) state.markets.delete(id);
 
       state.status.lastDiscovery = Date.now();
       if (found.size) { state.status.gamma = "live"; state.status.gammaMsg = `${found.size} markets found`; }
@@ -271,6 +276,11 @@ window.BlueEdgeData = (() => {
         ![...state.markets.values()].some(n => n.asset === m.asset && n.tf === m.tf && n.start <= now && n.end > now));
       if (since >= every || (rolled && since >= 15000)) discover();
       syncPoly();
+      if (!rtds.ws || rtds.ws.readyState > 1) { if (!rtds.timer) connectRtds(); }
+      refreshStaleBooks();
+      if (now % 5000 < 1000) resolverTick();
+      // make sure we hold a fresh window-open price for live markets that weren't open when the app loaded
+      for (const m of state.markets.values()) if (m.start <= now && m.end > now && !usesBinance(m) && chainlinkAt(m.asset, m.start) == null && !official[m.id]?.open && officialFails < 3 && now - (official[m.id]?.at || 0) > 60000) { fetchOfficial(m); break; }
     }, 1000);
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden && Date.now() - state.status.lastDiscovery > 15000) discover();
@@ -445,6 +455,7 @@ window.BlueEdgeData = (() => {
       const tf = { "5m": 5, "15m": 15, "1h": 60 }[x.k.i];
       if (!tf) return;
       state.opens[`${asset}:${tf}:${x.k.t}`] = +x.k.o;
+      if (x.k.x) state.closes[`${asset}:${tf}:${x.k.t}`] = +x.k.c;
       const s = state.spot[asset];
       if (!s || Date.now() - s.ts > 1500) state.spot[asset] = { price: +x.k.c, ts: Date.now() };
     }
@@ -454,9 +465,189 @@ window.BlueEdgeData = (() => {
     if (!poly.ws || poly.ws.readyState > 1) { clearTimeout(poly.timer); poly.timer = null; poly.retry = 0; syncPoly(); }
     if (!bin.ws || bin.ws.readyState > 1) { clearTimeout(bin.timer); bin.timer = null; bin.retry = 0; syncBinance(); }
   }
-  window.addEventListener("online", () => { limiter.pauseUntil = 0; reconnectAll(); discover(); });
+  window.addEventListener("online", () => { limiter.pauseUntil = 0; reconnectAll(); connectRtds(); discover(); });
   window.addEventListener("offline", () => { state.status.poly = "offline"; state.status.binance = "offline"; emit("status"); });
   document.addEventListener("visibilitychange", () => { if (!document.hidden) reconnectAll(); });
+
+
+  /* ---------- Chainlink prices from Polymarket RTDS (what 5m/15m markets resolve on) ---------- */
+  const RTDS_URL = "wss://ws-live-data.polymarket.com";
+  const rtds = { ws: null, retry: 0, last: 0, timer: null, ping: null };
+  const ticks = {}; // asset -> [{t, p}] kept for 75 minutes, max one per second
+  function addTick(asset, t, p) {
+    const arr = ticks[asset] || (ticks[asset] = []);
+    const last = arr[arr.length - 1];
+    if (last && Math.floor(last.t / 1000) === Math.floor(t / 1000)) last.p = p, last.t = Math.max(last.t, t);
+    else if (!last || t > last.t) arr.push({ t, p });
+    else { arr.push({ t, p }); arr.sort((a, b) => a.t - b.t); }
+    const cutoff = Date.now() - 75 * 60000;
+    while (arr.length && arr[0].t < cutoff) arr.shift();
+    const newest = arr[arr.length - 1];
+    state.chainlink[asset] = { price: newest.p, ts: newest.t };
+  }
+  function connectRtds() {
+    clearTimeout(rtds.timer); rtds.timer = null;
+    if (rtds.ws && rtds.ws.readyState <= 1) return;
+    let ws; try { ws = new WebSocket(RTDS_URL); } catch { return; }
+    rtds.ws = ws; rtds.last = Date.now(); state.status.chainlink = "connecting";
+    ws.onopen = () => {
+      rtds.retry = 0;
+      ws.send(JSON.stringify({ action: "subscribe", subscriptions: [{ topic: "crypto_prices_chainlink", type: "*", filters: "" }] }));
+      clearInterval(rtds.ping);
+      rtds.ping = setInterval(() => {
+        if (ws.readyState !== 1) return;
+        if (Date.now() - rtds.last > 30000) { try { ws.close(); } catch {} return; }
+        ws.send("PING");
+      }, 5000);
+    };
+    ws.onmessage = e => {
+      rtds.last = Date.now();
+      if (typeof e.data !== "string" || /^p[io]ng$/i.test(e.data)) return;
+      let d; try { d = JSON.parse(e.data); } catch { return; }
+      if (d?.topic !== "crypto_prices_chainlink" || !d.payload) return;
+      const sym = String(d.payload.symbol || "").toLowerCase(), asset = sym.split("/")[0].toUpperCase();
+      if (!asset) return;
+      const items = Array.isArray(d.payload.data) ? d.payload.data : [d.payload];
+      for (const it of items) { const p = Number(it.value), t = Number(it.timestamp) || Date.now(); if (p > 0) addTick(asset, t, p); }
+      if (state.status.chainlink !== "live") { state.status.chainlink = "live"; emit("status"); }
+      emitSoon("spot", 400);
+    };
+    ws.onerror = () => {};
+    ws.onclose = () => {
+      clearInterval(rtds.ping);
+      state.status.chainlink = "reconnecting"; emit("status");
+      rtds.timer = setTimeout(connectRtds, Math.min(30000, 1000 * 2 ** rtds.retry++));
+    };
+  }
+  // first Chainlink tick at or just after time t (the value Polymarket snapshots)
+  function chainlinkAt(asset, t, maxLagMs = 6000) {
+    const arr = ticks[asset]; if (!arr || !arr.length || arr[0].t > t) return null;
+    for (const k of arr) if (k.t >= t) return k.t - t <= maxLagMs ? k.p : null;
+    return null;
+  }
+
+  /* ---------- official window prices from polymarket.com (best effort; disabled if the browser blocks it) ---------- */
+  const official = {}; let officialFails = 0;
+  const VARIANT = { 5: "fiveminute", 15: "fifteen", 60: "hourly" };
+  async function fetchOfficial(m) {
+    if (officialFails >= 3) return official[m.id] || null;
+    const o = official[m.id] || (official[m.id] = {});
+    if (o.done || Date.now() - (o.at || 0) < 20000) return o;
+    o.at = Date.now();
+    try {
+      const q = new URLSearchParams({ symbol: m.asset, eventStartTime: new Date(m.start).toISOString(), variant: VARIANT[m.tf], endDate: new Date(m.end).toISOString() });
+      const r = await fetch(`https://polymarket.com/api/crypto/crypto-price?${q}`, { cache: "no-store" });
+      if (!r.ok) throw new Error(r.status);
+      const j = await r.json(); officialFails = 0;
+      if (Number(j.openPrice) > 0) o.open = Number(j.openPrice);
+      if (j.closePrice != null && Number(j.closePrice) > 0) o.close = Number(j.closePrice);
+      if (j.completed && o.close) o.done = true;
+    } catch { officialFails++; }
+    return o;
+  }
+
+  const usesBinance = m => /binance/.test(m.resolutionSource || "");
+  function priceToBeat(m) {
+    const o = official[m.id];
+    if (o?.open > 0) return { price: o.open, source: "Polymarket" };
+    const bin = state.opens[`${m.asset}:${m.tf}:${m.start}`];
+    if (usesBinance(m)) return bin != null ? { price: bin, source: "Binance" } : null;
+    const c = chainlinkAt(m.asset, m.start);
+    if (c != null) return { price: c, source: "Chainlink" };
+    return bin != null ? { price: bin, source: "Binance (est.)" } : null;
+  }
+  function livePrice(m) {
+    const c = state.chainlink[m.asset], s = state.spot[m.asset];
+    if (!usesBinance(m) && c && Date.now() - c.ts < 60000) return { price: c.price, source: "Chainlink", ts: c.ts };
+    return s ? { price: s.price, source: "Binance", ts: s.ts } : null;
+  }
+
+  /* ---------- resolutions: official first, never stuck ---------- */
+  const resolveTries = new Map();
+  const TF_INTERVAL = { 5: "5m", 15: "15m", 60: "1h" };
+  async function binanceClose(m) {
+    const key = `${m.asset}:${m.tf}:${m.start}`;
+    if (state.closes[key] != null) return state.closes[key];
+    for (const host of ["https://data-api.binance.vision", "https://api.binance.com", "https://api.binance.us"]) {
+      try {
+        const r = await fetch(`${host}/api/v3/klines?symbol=${m.asset}USDT&interval=${TF_INTERVAL[m.tf]}&startTime=${m.start}&limit=1`, { cache: "no-store" });
+        if (!r.ok) continue;
+        const k = (await r.json())[0];
+        if (k && k[0] === m.start && Date.now() > k[6]) { state.opens[key] = +k[1]; state.closes[key] = +k[4]; return +k[4]; }
+        return null;
+      } catch {}
+    }
+    return null;
+  }
+  const setRes = (m, winner, source, officialFlag) => {
+    const prev = state.resolutions[m.id];
+    state.resolutions[m.id] = { winner, source, official: officialFlag, at: Date.now() };
+    if (!prev || prev.official !== officialFlag || prev.winner !== winner) emit("resolution", m);
+    return state.resolutions[m.id];
+  };
+  // m: { id (conditionId), slug, asset, tf, start, end, upToken?, resolutionSource? }
+  async function resolve(m, { estimateAfterMs = 90000 } = {}) {
+    const known = state.resolutions[m.id];
+    if (known?.official) return known;
+    const now = Date.now();
+    if (now < m.end + 4000) return null;
+    if (now - (resolveTries.get(m.id) || 0) < 10000) return known || null;
+    resolveTries.set(m.id, now);
+    try {
+      const j = await gamma(`/markets/${m.id}`, 0, CLOB_REST);
+      const win = (j?.tokens || []).find(t => t.winner === true);
+      if (win) return setRes(m, (m.upToken ? String(win.token_id) === String(m.upToken) : /^(up|yes)$/i.test(win.outcome)) ? "Up" : "Down", "Polymarket", true);
+    } catch {}
+    if (m.slug) {
+      try {
+        const g = await fetchResolutions([m.slug]);
+        const w = g[m.slug]?.winner;
+        if (w) return setRes(m, /^(up|yes)$/i.test(w) ? "Up" : "Down", "Polymarket", true);
+      } catch {}
+    }
+    const o = await fetchOfficial(m);
+    if (o?.done && o.open > 0 && o.close > 0) return setRes(m, o.close >= o.open ? "Up" : "Down", "Polymarket prices", true);
+    if (now > m.end + estimateAfterMs) {
+      const open = priceToBeat(m)?.price;
+      let close = usesBinance(m) ? null : chainlinkAt(m.asset, m.end);
+      let src = "Chainlink";
+      if (close == null) { close = await binanceClose(m); src = "Binance"; }
+      if (open != null && close != null) return setRes(m, close >= open ? "Up" : "Down", `${src} (estimated)`, false);
+    }
+    return state.resolutions[m.id] || null;
+  }
+  // background: resolve ended markets we still track (a few per tick to stay light)
+  let resolverBusy = false;
+  async function resolverTick() {
+    if (resolverBusy) return; resolverBusy = true;
+    try {
+      const now = Date.now();
+      const due = [...state.markets.values()].filter(m => m.end < now - 4000 && m.end > now - 40 * 60000 && !state.resolutions[m.id]?.official)
+        .sort((a, b) => b.end - a.end).slice(0, 3);
+      for (const m of due) await resolve(m);
+    } finally { resolverBusy = false; }
+  }
+
+  /* ---------- REST fallback for quiet or missing order books ---------- */
+  let booksAt = 0, bookFails = 0;
+  async function refreshStaleBooks() {
+    if (bookFails > 4 || Date.now() - booksAt < 8000 || !poly.want.size) return;
+    const now = Date.now();
+    const stale = [...poly.want].filter(t => { const b = state.books[t]; return !b || b.src !== "ws" || now - b.ts > 20000; }).slice(0, 40);
+    if (!stale.length) return;
+    booksAt = now;
+    try {
+      const res = await schedule(() => fetch(CLOB_REST + "/books", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(stale.map(t => ({ token_id: t }))), cache: "no-store" }));
+      if (!res.ok) throw new Error(res.status);
+      for (const bk of await res.json()) {
+        const bids = (bk.bids || []).map(x => +x.price), asks = (bk.asks || []).map(x => +x.price);
+        const b = state.books[bk.asset_id] || (state.books[bk.asset_id] = {});
+        if (b.src === "ws" && now - b.ts <= 20000) continue;
+        Object.assign(b, { bid: bids.length ? Math.max(...bids) : null, ask: asks.length ? Math.min(...asks) : null, ts: Date.now(), src: b.src === "ws" ? "ws" : "rest" });
+      }
+      bookFails = 0; emitSoon("books", 200);
+    } catch { bookFails++; }
+  }
 
   /* ---------- settlement lookups ---------- */
   async function fetchResolutions(slugs) {
@@ -489,7 +680,8 @@ window.BlueEdgeData = (() => {
   }
 
   return {
-    state, on, discover, startLoop, setDiscoveryInterval: setInterval_, fetchResolutions,
+    state, on, discover, startLoop, setDiscoveryInterval: setInterval_, fetchResolutions, priceToBeat, livePrice, resolve,
+    resolutionFor: id => state.resolutions[id] || null,
     bookFor, openFor, spotFor, markets, watch, TIMEFRAMES
   };
 })();

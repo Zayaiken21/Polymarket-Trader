@@ -518,3 +518,59 @@ form .btn.big { width: 100%; }
 .secret code { grid-column: 1; font-size: 12px; word-break: break-all; color: var(--text); }
 .secret .btn { grid-column: 2; grid-row: 1 / span 2; }
 .tag.won, .tag.lost { font-size: 12px; }
+
+/* v3.1: account switch card + settings shortcut */
+.icon-link { width: 38px; height: 38px; display: grid; place-items: center; border-radius: 50%; background: var(--bg-2); border: 1px solid var(--line-soft); color: var(--muted); flex: none; }
+.icon-link svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
+.icon-link:hover { color: var(--text); }
+@media (min-width: 1000px) { .icon-link { display: none; } }
+@media (max-width: 400px) { .topbar .brand-mark.small { display: none; } .mode-switch button { padding: 0 9px; } }
+.mode-card { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 14px; margin-bottom: 12px; padding: 12px 14px; border-radius: var(--radius-lg); background: var(--panel); border: 1px solid var(--line-soft); }
+.mode-card.live { border-color: rgba(255, 111, 125, .4); background: linear-gradient(180deg, rgba(255, 111, 125, .07), transparent), var(--panel); }
+.mode-card-text b { display: block; font-size: 15px; }
+.mode-card-text span { color: var(--muted); font-size: 13px; }
+.mode-card-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.mode-card-actions .btn { margin: 0; }
+
+/* v3.2: full-screen on phones, accounts, checks, results */
+html, body { max-width: 100%; overflow-x: hidden; }
+body { touch-action: pan-x pan-y; }
+.chart-host { touch-action: none; }
+.main > section, .panel, .form-grid > *, .home-top > *, .market-grid > *, .pos, .pos-main, .acct, .acct-main, .kv div { min-width: 0; }
+dd, code, .secret code, .notice, .form-error, .mc-status, .toast span { overflow-wrap: anywhere; }
+.form-error { white-space: pre-line; }
+.mc-foot { flex-wrap: wrap; }
+.mc-status.res-up { background: var(--up-soft); color: var(--up); }
+.mc-status.res-down { background: var(--down-soft); color: var(--down); }
+.tag.void { background: var(--raised); color: var(--muted); }
+
+.reveal-wrap { position: relative; display: flex; }
+.reveal-wrap input { padding-right: 64px; }
+.eye { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); min-height: 34px; padding: 0 10px; border-radius: 8px; font-size: 13px; font-weight: 800; color: var(--accent); background: var(--raised); }
+.toggle-row { display: flex; align-items: center; gap: 10px; margin: 4px 0 2px; font-size: 14px; font-weight: 700; color: var(--muted); min-height: 40px; }
+.toggle-row input { width: 20px; height: 20px; accent-color: var(--accent); }
+.form-section { margin: 22px 0 -4px; padding-top: 14px; border-top: 1px solid var(--line-soft); font-size: 13px; font-weight: 800; color: var(--accent); }
+.form-section .opt { color: var(--faint); }
+select { width: 100%; }
+
+.acct-list { display: grid; gap: 8px; margin-bottom: 4px; }
+.acct { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; padding: 10px 12px; border-radius: var(--radius); background: var(--bg-2); border: 1px solid var(--line-soft); }
+.acct.active { border-color: var(--accent); }
+.acct-main b { display: block; font-size: 15px; }
+.acct-main span { color: var(--muted); font-size: 13px; }
+.acct-actions { display: flex; gap: 6px; align-items: center; }
+.acct-actions .btn { margin: 0; }
+.acct-detail { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line-soft); }
+.acct-detail h4 { margin: 0 0 12px; font-size: 16px; font-weight: 800; }
+.acct-detail .tag { vertical-align: middle; margin-left: 6px; }
+.reveal-form { margin-top: 6px; }
+
+.check-list { list-style: none; margin: 14px 0 0; padding: 0; display: grid; gap: 8px; }
+.check-list li { display: grid; grid-template-columns: 26px 1fr; gap: 10px; align-items: start; padding: 10px 12px; border-radius: var(--radius-sm); background: var(--bg-2); border: 1px solid var(--line-soft); }
+.check-list i { width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; font-style: normal; font-weight: 900; font-size: 13px; background: var(--raised); color: var(--muted); }
+.check-list li.ok i { background: var(--up-soft); color: var(--up); }
+.check-list li.bad { border-color: rgba(255, 111, 125, .35); }
+.check-list li.bad i { background: var(--down-soft); color: var(--down); }
+.check-list b { display: block; font-size: 14px; }
+.check-list span { color: var(--muted); font-size: 13px; }
+.loader.tiny { width: 18px; height: 18px; border-width: 2px; }

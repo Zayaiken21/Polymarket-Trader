@@ -74,10 +74,11 @@
   const mid = b => (b.bid != null && b.ask != null ? (b.bid + b.ask) / 2 : b.ask ?? b.bid ?? null);
   function vm(m, now = Date.now()) {
     const ub = D.bookFor(m.upToken), db = D.bookFor(m.downToken);
-    const ctx = { now, up: { bid: ub.bid ?? null, ask: ub.ask ?? null }, down: { bid: db.bid ?? null, ask: db.ask ?? null }, open: D.openFor(m), spot: D.spotFor(m.asset) };
+    const ptb = D.priceToBeat(m), lp = D.livePrice(m);
+    const ctx = { now, up: { bid: ub.bid ?? null, ask: ub.ask ?? null }, down: { bid: db.bid ?? null, ask: db.ask ?? null }, open: ptb?.price ?? null, openSource: ptb?.source || "", spot: lp?.price ?? null, spotSource: lp?.source || "" };
     const um = mid(ctx.up), dm = mid(ctx.down);
     return {
-      m, ctx, decision: S.evaluate(strategy, m, ctx),
+      m, ctx, decision: S.evaluate(strategy, m, ctx), res: D.resolutionFor(m.id),
       upProb: um != null ? um : dm != null ? 1 - dm : null,
       move: ctx.open != null && ctx.spot != null ? (ctx.spot - ctx.open) / ctx.open : null,
       live: m.start <= now && m.end > now, left: m.end - now,
@@ -137,19 +138,25 @@
   }
   function updateCard(el, v) {
     const now = Date.now();
-    set(field(el, "left"), v.live ? clock(v.left) : v.m.start > now ? `in ${clock(v.m.start - now)}` : "settling");
+    const ended = v.m.end <= now;
+    set(field(el, "left"), v.live ? clock(v.left) : v.m.start > now ? `in ${clock(v.m.start - now)}` : "ended");
     field(el, "progress").style.transform = `scaleX(${v.progress.toFixed(4)})`;
     set(field(el, "upAsk"), cents(v.ctx.up.ask));
     set(field(el, "downAsk"), cents(v.ctx.down.ask));
     field(el, "split").style.transform = `scaleX(${(v.upProb ?? 0.5).toFixed(4)})`;
-    set(field(el, "spot"), v.ctx.spot != null ? `Binance ${fmtPrice(v.ctx.spot)}` : "Binance connecting…");
+    set(field(el, "spot"), v.ctx.open != null ? `To beat ${fmtPrice(v.ctx.open)}` : "Price to beat loading…");
     const mv = field(el, "move");
-    set(mv, v.move == null ? "" : `${v.move >= 0 ? "▲" : "▼"} ${(Math.abs(v.move) * 100).toFixed(3)}%`);
+    set(mv, v.ctx.spot == null ? "" : `${fmtPrice(v.ctx.spot)}${v.move == null ? "" : ` ${v.move >= 0 ? "▲" : "▼"}${(Math.abs(v.move) * 100).toFixed(3)}%`}`);
     mv.className = v.move == null ? "" : v.move >= 0 ? "gain" : "loss";
     const held = holdingFor(v.m);
     const st = field(el, "status");
-    set(st, held ? `You hold ${held.side}` : v.decision.reason);
-    st.className = "mc-status " + (held ? "held" : v.decision.ok ? "ready" : /are off/.test(v.decision.reason) ? "off" : "wait");
+    if (ended) {
+      set(st, v.res ? `Resolved ${v.res.winner}${v.res.official ? "" : " (estimated)"}${held ? `, you held ${held.side}` : ""}` : "Waiting for the official result…");
+      st.className = "mc-status " + (v.res ? (v.res.winner === "Up" ? "res-up" : "res-down") : "wait");
+    } else {
+      set(st, held ? `You hold ${held.side}` : v.decision.reason);
+      st.className = "mc-status " + (held ? "held" : v.decision.ok ? "ready" : /are off/.test(v.decision.reason) ? "off" : "wait");
+    }
     el.classList.toggle("is-ready", v.decision.ok && !held);
     el.classList.toggle("is-urgent", v.live && v.left < 60000);
   }
@@ -178,8 +185,8 @@
         <button class="side down" role="radio" data-side="Down"><span>Down</span><b data-f="downAsk"></b><small data-f="downBid"></small></button>
       </div>
       <dl class="kv">
-        <div><dt>Binance now</dt><dd data-f="spot"></dd></div><div><dt>Window open</dt><dd data-f="open"></dd></div>
-        <div><dt>Move</dt><dd data-f="move"></dd></div><div><dt>Liquidity</dt><dd data-f="liq"></dd></div>
+        <div><dt>Price to beat</dt><dd data-f="open"></dd></div><div><dt>Live price</dt><dd data-f="spot"></dd></div>
+        <div><dt>Difference</dt><dd data-f="move"></dd></div><div><dt>Liquidity</dt><dd data-f="liq"></dd></div>
       </dl>
       <div class="ticket">
         <div class="ticket-row"><span>Account</span><b data-f="acct"></b></div>
@@ -209,13 +216,14 @@
     const tf = { hour: "numeric", minute: "2-digit" };
     set(f("window"), `${new Date(m.start).toLocaleTimeString([], tf)} – ${new Date(m.end).toLocaleTimeString([], tf)}`);
     set(f("left"), v.live ? clock(v.left) : m.start > now ? clock(m.start - now) : "0:00");
-    set(f("leftLabel"), v.live ? "left in this window" : m.start > now ? "until this window opens" : "closed, waiting for result");
+    set(f("leftLabel"), v.live ? "left in this window" : m.start > now ? "until this window opens" : v.res ? `resolved ${v.res.winner}${v.res.official ? " (official)" : " (estimated)"}` : "closed, waiting for result");
     f("progress").style.transform = `scaleX(${v.progress.toFixed(4)})`;
     set(f("upAsk"), cents(v.ctx.up.ask)); set(f("downAsk"), cents(v.ctx.down.ask));
     set(f("upBid"), `sell ${cents(v.ctx.up.bid)}`); set(f("downBid"), `sell ${cents(v.ctx.down.bid)}`);
     $$(".side", el).forEach(b => b.setAttribute("aria-checked", String(b.dataset.side === side)));
-    set(f("spot"), fmtPrice(v.ctx.spot)); set(f("open"), fmtPrice(v.ctx.open));
-    const mv = f("move"); set(mv, v.move == null ? "—" : `${v.move >= 0 ? "+" : "−"}${(Math.abs(v.move) * 100).toFixed(3)}%`); mv.className = v.move == null ? "" : v.move >= 0 ? "gain" : "loss";
+    set(f("open"), v.ctx.open == null ? "Loading…" : `${fmtPrice(v.ctx.open)} ${v.ctx.openSource ? `(${v.ctx.openSource})` : ""}`);
+    set(f("spot"), v.ctx.spot == null ? "—" : `${fmtPrice(v.ctx.spot)} ${v.ctx.spotSource ? `(${v.ctx.spotSource})` : ""}`);
+    const mv = f("move"); set(mv, v.move == null ? "—" : `${v.move >= 0 ? "+" : "−"}$${Math.abs(v.ctx.spot - v.ctx.open).toFixed(v.ctx.open >= 100 ? 2 : v.ctx.open >= 1 ? 4 : 5)} ${v.move >= 0 ? "above" : "below"} (${(Math.abs(v.move) * 100).toFixed(3)}%)`);
     set(f("liq"), m.liquidity ? "$" + Math.round(m.liquidity).toLocaleString() : "—");
 
     const live = isLive();
@@ -223,7 +231,7 @@
     const stake = Math.min(S.stake(strategy, equity()), cash);
     const ask = book.ask;
     const shares = ask > 0 && ask < 1 ? Math.floor((stake / ask) * 100) / 100 : 0;
-    set(f("acct"), live ? (L.isUnlocked() ? "Live (real money)" : "Live, locked") : "Paper");
+    set(f("acct"), live ? (L.canTrade() ? "Live (real money)" : L.isUnlocked() ? "Live, read-only" : "Live, locked") : "Paper");
     f("acct").className = live ? "loss" : "";
     set(f("stake"), money(stake));
     set(f("shares"), shares ? shares.toFixed(2) : "—");
@@ -245,6 +253,7 @@
     if (!v.live && m.start <= now) blocked = "Window closed";
     else if (held) blocked = "Already holding";
     else if (live && !L.isUnlocked()) blocked = "Unlock your live account";
+    else if (live && !L.canTrade()) blocked = "Account is read-only";
     else if (!(ask > 0 && ask < 1)) blocked = `No ${side} sellers`;
     else if (live ? stake < 1 : shares < m.minShares) blocked = live ? "Stake must be at least $1" : `Min ${m.minShares} shares`;
     set(btn, blocked || `Buy ${side} for ${money(live ? stake : shares * ask)}${live ? " (live)" : ""}`);
@@ -268,7 +277,7 @@
     const cost = shares * ask, fee = S.fee(shares, ask, m.feeRate);
     if (cost + fee > account.cash + 1e-9) return fail("Not enough paper cash.");
     account.cash -= cost + fee;
-    trades.push({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 7), marketId: m.id, slug: m.slug, url: m.url, asset: m.asset, tf: m.tf, start: m.start, end: m.end, side, outcome: side === "Up" ? m.upLabel : m.downLabel, token, feeRate: m.feeRate, entry: ask, shares, cost, fee, openedAt: Date.now(), status: "open", source });
+    trades.push({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 7), marketId: m.id, slug: m.slug, url: m.url, asset: m.asset, tf: m.tf, start: m.start, end: m.end, side, outcome: side === "Up" ? m.upLabel : m.downLabel, token, upToken: m.upToken, resolutionSource: m.resolutionSource || "", feeRate: m.feeRate, entry: ask, shares, cost, fee, openedAt: Date.now(), status: "open", source });
     saveAccount(); saveTrades(); watchOpen();
     toast(`${source === "bot" ? "Bot bought" : "Bought"} ${shares.toFixed(2)} ${side} on ${m.asset} ${tfShort(m.tf)} at ${cents(ask)} (paper)`, "good");
     render();
@@ -287,25 +296,33 @@
     toast(`${why}: ${t.asset} ${tfShort(t.tf)} ${t.side} at ${cents(bid)} (${money(t.pnl, true)})`, t.pnl >= 0 ? "good" : "bad");
     render();
   }
-  let settling = false, lastSettle = 0;
-  async function settlePaper(force = false) {
+  let settling = false;
+  async function settlePaper() {
     if (settling || !isLeader()) return;
-    const due = openTrades().filter(t => Date.now() > t.end + 15000);
-    if (!due.length || (!force && Date.now() - lastSettle < 15000)) return;
-    settling = true; lastSettle = Date.now();
+    const due = openTrades().filter(t => Date.now() > t.end + 4000);
+    if (!due.length) return;
+    settling = true;
     try {
-      const results = await D.fetchResolutions(due.map(t => t.slug));
+      const results = {};
+      for (const t of due) {
+        results[t.id] = await D.resolve({ id: t.marketId, slug: t.slug, asset: t.asset, tf: t.tf, start: t.start, end: t.end, upToken: t.upToken || (t.side === "Up" ? t.token : null), resolutionSource: t.resolutionSource || "" });
+      }
       reloadBook();
       let changed = 0;
       for (const t of trades) {
-        if (t.status !== "open") continue;
-        const r = results[t.slug];
-        if (!r || !r.winner) continue;
-        const won = r.winner.toLowerCase() === String(t.outcome || t.side).toLowerCase();
-        const payout = won ? t.shares : 0;
-        Object.assign(t, { status: won ? "won" : "lost", exit: won ? 1 : 0, closedAt: Date.now(), pnl: payout - t.cost - t.fee, note: `Settled ${r.winner}` });
+        if (t.status !== "open" || !(t.id in results)) continue;
+        const r = results[t.id];
+        if (!r) {
+          if (Date.now() > t.end + 20 * 60000) { // no result from any source after 20 minutes: refund instead of staying stuck
+            Object.assign(t, { status: "void", exit: t.entry, closedAt: Date.now(), pnl: 0, note: "Refunded, no result" });
+            account.cash += t.cost + t.fee; changed++;
+          }
+          continue;
+        }
+        const won = r.winner === t.side, payout = won ? t.shares : 0;
+        Object.assign(t, { status: won ? "won" : "lost", exit: won ? 1 : 0, closedAt: Date.now(), pnl: payout - t.cost - t.fee, note: `Resolved ${r.winner}${r.official ? "" : " (est.)"}`, official: r.official });
         account.cash += payout; changed++;
-        toast(`${t.asset} ${tfShort(t.tf)} settled ${r.winner}. Paper ${won ? "win" : "loss"} of ${money(Math.abs(t.pnl))}.`, won ? "good" : "bad");
+        toast(`${t.asset} ${tfShort(t.tf)} resolved ${r.winner}${r.official ? "" : " (estimated)"}. Paper ${won ? "win" : "loss"}: ${money(t.pnl, true)}.`, won ? "good" : "bad");
       }
       if (changed) { saveAccount(); saveTrades(); watchOpen(); render(); }
     } catch (e) { console.warn("Settlement check failed:", e.message); }
@@ -315,7 +332,7 @@
   /* ---------- live trading ---------- */
   async function liveBuy(m, side, source) {
     if (liveBusy) return { ok: false, msg: "Another order is in progress." };
-    if (!L.isUnlocked()) { if (source !== "bot") toast("Unlock your live account in Settings first.", "bad"); return { ok: false, msg: "Live account is locked." }; }
+    if (!L.canTrade()) { const msg = L.isUnlocked() ? "This account is read-only. Edit it in Settings and add the signer private key to trade." : "Unlock your live account in Settings first."; if (source !== "bot") toast(msg, "bad"); return { ok: false, msg }; }
     const token = side === "Up" ? m.upToken : m.downToken;
     const ask = D.bookFor(token).ask;
     if (!(ask > 0 && ask < 1)) { if (source !== "bot") toast(`No ${side} sellers right now.`, "bad"); return { ok: false, msg: "No sellers" }; }
@@ -365,13 +382,15 @@
     const views = liveMarkets(now).map(m => vm(m, now));
 
     if (isLive()) {
-      if (!L.isUnlocked()) { botNote = "Waiting: unlock your live account in Settings."; return; }
+      if (!L.canTrade()) { botNote = L.isUnlocked() ? "Paused: this account is read-only (no signer private key)." : "Waiting: unlock your live account in Settings."; return; }
       if (liveBusy) return;
       const idx = tokenIndex();
       const activePositions = L.state.positions.filter(p => { const hit = idx.get(String(p.assetId ?? p.tokenId)); return hit && hit.m.end > now; });
-      const openCount = activePositions.length + L.state.orders.length;
-      if (openCount >= S.RULES.maxOpen) { botNote = `Holding ${openCount} of ${S.RULES.maxOpen} live positions/orders.`; return; }
       const tried = liveTried();
+      // orders we just placed count too, because Polymarket can take a few seconds to show the new position
+      const pending = Object.keys(tried).filter(id => { const mk = D.state.markets.get(id); return mk && mk.end > now; }).length;
+      const openCount = Math.max(activePositions.length + L.state.orders.length, pending);
+      if (openCount >= S.RULES.maxOpen) { botNote = `Holding ${openCount} of ${S.RULES.maxOpen} live positions/orders.`; return; }
       const ready = views.filter(v => v.decision.ok && !tried[v.m.id] && !holdingFor(v.m)).sort((a, b) => a.m.end - b.m.end);
       if (!ready.length) { botNote = views.length ? `Watching ${views.length} live markets. None match right now.` : "Waiting for live markets…"; return; }
       if (account.botMode === "ask") return offer(ready);
@@ -406,7 +425,7 @@
 
   function setBot(on) {
     if (on && isLive()) {
-      if (!L.isUnlocked()) { toast("Unlock your live account before starting the bot.", "bad"); location.hash = "#settings"; return; }
+      if (!L.canTrade()) { toast(L.isUnlocked() ? "This account is read-only. Add the signer private key to trade." : "Unlock your live account before starting the bot.", "bad"); location.hash = "#settings"; return; }
       const stake = S.stake(strategy, L.equity());
       if (!confirm(`Start the LIVE bot?\n\nIt will place real market orders of about ${money(stake)} each on Polymarket, up to ${S.RULES.maxOpen} at a time, while this page is open.`)) return;
     }
@@ -430,7 +449,7 @@
   function draw() {
     rollDay();
     drawHeader(); drawAccount(); drawBot(); drawMoney();
-    if (view === "home") drawHome();
+    if (view === "home") { drawModeCard(); drawHome(); }
     if (view === "markets") drawMarkets();
     if (view === "chart") drawChartPage();
     if (view === "trades") drawTrades();
@@ -479,6 +498,20 @@
     html($("#accountStats"), statRow([["Cash", money(account.cash)], ["Today", money(day, true), signClass(day)], ["Win rate", closed.length ? `${Math.round((wins / closed.length) * 100)}%` : "—"], ["Open", String(openTrades().length)]]));
   }
 
+  function drawModeCard() {
+    const info = L.vaultInfo();
+    let h;
+    if (isLive()) {
+      h = `<div class="mode-card-text"><b class="loss">Live account: real money</b><span>${esc(info?.label || "Polymarket")}${L.isUnlocked() ? "" : " (locked)"}</span></div>
+        <div class="mode-card-actions">${L.isUnlocked() ? "" : `<a class="btn small" href="#settings">Unlock</a>`}<button class="btn small ghost" data-mode="paper">Switch to Paper</button><a class="btn small ghost" href="#chart">Chart</a></div>`;
+    } else {
+      h = `<div class="mode-card-text"><b>Paper account: practice money</b><span>${info ? `Live account ready: ${esc(info.label)}` : "No live account connected yet"}</span></div>
+        <div class="mode-card-actions">${info ? `<button class="btn small" data-mode="live">Switch to Live</button>` : `<a class="btn small" href="#settings">Connect live account</a>`}<a class="btn small ghost" href="#chart">Chart</a></div>`;
+    }
+    html($("#modeCard"), h);
+    $("#modeCard").classList.toggle("live", isLive());
+  }
+
   function drawBot() {
     set($("#botTitle"), botOn ? (isLive() ? "Live bot is trading" : "Paper bot is trading") : `${isLive() ? "Live" : "Paper"} bot is off`);
     let note;
@@ -523,8 +556,10 @@
       const next = new Map();
       for (const m of D.markets()) { if (m.start <= now) continue; const k = `${m.asset}:${m.tf}`; if (!next.has(k) || next.get(k).start > m.start) next.set(k, m); }
       list = [...next.values()];
-    } else list = liveMarkets(now);
-    list = list.filter(m => ui.marketsTf === "all" || m.tf === Number(ui.marketsTf)).map(m => vm(m, now)).sort((a, b) => (b.decision.ok - a.decision.ok) || a.m.end - b.m.end);
+    } else if (ui.marketsWhen === "resolved") list = D.markets().filter(m => m.end <= now);
+    else list = liveMarkets(now);
+    list = list.filter(m => ui.marketsTf === "all" || m.tf === Number(ui.marketsTf)).map(m => vm(m, now))
+      .sort(ui.marketsWhen === "resolved" ? (a, b) => b.m.end - a.m.end : (a, b) => (b.decision.ok - a.decision.ok) || a.m.end - b.m.end).slice(0, 80);
     const live = liveMarkets(now), assets = new Set(live.map(m => m.asset));
     set($("#marketsCaption"), D.state.status.lastDiscovery ? `${live.length} live markets across ${assets.size} coin${assets.size === 1 ? "" : "s"}. ${list.filter(v => v.decision.ok).length} match the bot's rules.` : "Finding markets…");
     keyed($("#allMarkets"), list, v => v.m.id, createCard, updateCard, marketsEmpty());
@@ -680,89 +715,141 @@
     ctx.beginPath(); pts.forEach((v, i) => (i ? ctx.lineTo(x(i), y(v)) : ctx.moveTo(x(i), y(v)))); ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.lineJoin = "round"; ctx.stroke();
   }
 
-  /* settings */
-  let revealed = null, revealTimer = null, liveFormError = "", submitting = false;
-  const secretRow = (label, value) => `<div class="secret"><span>${esc(label)}</span><code>${esc(value)}</code><button class="btn small" data-copy="${esc(value)}">Copy</button></div>`;
-  function livePanelHtml() {
-    const st = L.state, info = L.vaultInfo();
-    const err = liveFormError ? `<p class="form-error">${esc(liveFormError)}</p>` : "";
-    if (st.status === "unlocking" && !info) return `<h3>Connecting to Polymarket</h3><div class="empty small"><div class="loader"></div><p>${esc(st.message || "Connecting…")}</p></div>`;
-    if (!info) return `
-      <h3>Connect a Polymarket account</h3>
-      <p class="hint" style="margin-top:0">Enter these once. They're encrypted with your passcode and kept on this device only.</p>
-      <form id="connectForm" autocomplete="off" novalidate>
-        <label class="field"><span>Account name</span><input type="text" name="label" placeholder="My Polymarket" maxlength="40"></label>
-        <label class="field"><span>Polymarket wallet address</span><input type="text" name="wallet" placeholder="0x…" autocapitalize="off" spellcheck="false"><small>From your profile menu on polymarket.com. It's the address that holds your funds.</small></label>
-        <label class="field"><span>Signer private key</span><input type="password" name="privateKey" placeholder="0x…" autocapitalize="off" spellcheck="false"><small>The key for the Signer Address Polymarket shows. It signs each order and creates your trading API credentials automatically.</small></label>
-        <label class="field"><span>Relayer API key <em class="opt">optional</em></span><input type="password" name="relayerKey" autocapitalize="off" spellcheck="false"><small>Settings, API Keys, Relayer API Keys. Lets Polymarket set up trading approvals without gas.</small></label>
-        <label class="field"><span>Relayer address <em class="opt">optional</em></span><input type="text" name="relayerAddress" placeholder="0x…" autocapitalize="off" spellcheck="false"></label>
-        <label class="field"><span>Passcode</span><input type="password" name="passcode" autocomplete="new-password"><small>At least 8 characters. You'll use it to unlock this account.</small></label>
-        <label class="field"><span>Confirm passcode</span><input type="password" name="passcode2" autocomplete="new-password"></label>
-        ${err}
-        <button class="btn primary big" type="submit">Connect account</button>
-      </form>
-      <button class="btn ghost" data-action="import-account">Load an account file</button>
-      <p class="notice">Don't enter Builder API keys here. Polymarket says they must stay on a server, and they can't place orders anyway.</p>`;
-    if (!L.isUnlocked()) return `
-      <h3>${esc(info.label)}</h3>
-      <dl class="kv plain"><div><dt>Wallet</dt><dd>${esc(shortAddr(info.wallet))}</dd></div><div><dt>Signer</dt><dd>${esc(shortAddr(info.signer))}</dd></div></dl>
-      <form id="unlockForm" autocomplete="off" novalidate>
-        <label class="field"><span>Passcode</span><input type="password" name="passcode" autocomplete="current-password"></label>
-        ${err}
-        <button class="btn primary big" type="submit">Unlock</button>
-      </form>
-      <div class="btn-row"><button class="btn ghost" data-action="export-account">Download account file</button><button class="btn ghost danger-text" data-action="disconnect">Disconnect</button></div>`;
-    const acct = st.account || {};
-    const cred = revealed?.credentials || {};
-    const rev = revealed ? `
-      <div class="secrets">
-        ${secretRow("Signer private key", revealed.privateKey)}
-        ${cred.key || cred.apiKey ? secretRow("CLOB API key", cred.key || cred.apiKey) + secretRow("CLOB secret", cred.secret || "") + secretRow("CLOB passphrase", cred.passphrase || "") : ""}
-        ${revealed.relayerKey ? secretRow("Relayer API key", revealed.relayerKey) : ""}
-        <p class="hint">Hidden again in 60 seconds.</p>
-        <button class="btn ghost small" data-action="hide-secrets">Hide now</button>
-      </div>` : `
-      <form id="revealForm" autocomplete="off" novalidate>
-        <label class="field"><span>Passcode to view keys</span><input type="password" name="passcode" autocomplete="current-password"></label>
-        ${err}<button class="btn ghost" type="submit">View account details</button>
-      </form>`;
-    return `
-      <h3>${esc(info.label)} <span class="tag won">Connected</span></h3>
-      <dl class="kv plain">
-        <div><dt>Cash</dt><dd>${st.balance == null ? "—" : esc(money(st.balance))}</dd></div>
-        <div><dt>Wallet type</dt><dd>${esc(WALLET_TYPES[acct.walletType] ?? String(acct.walletType ?? "—"))}</dd></div>
-        <div><dt>Wallet</dt><dd class="copyable" data-copy="${esc(info.wallet)}">${esc(shortAddr(info.wallet))}</dd></div>
-        <div><dt>Signer</dt><dd class="copyable" data-copy="${esc(info.signer)}">${esc(shortAddr(info.signer))}</dd></div>
-        <div><dt>Relayer key</dt><dd>${info.hasRelayer ? "Added" : "Not added"}</dd></div>
-        <div><dt>Order updates</dt><dd>${esc({ live: "Streaming", connecting: "Connecting", reconnecting: "Reconnecting", off: "Off" }[st.stream] || st.stream)}</dd></div>
-      </dl>
-      ${rev}
-      <div class="btn-row">
-        <button class="btn ghost" data-action="export-account">Download account file</button>
-        <button class="btn ghost" data-action="lock">Lock</button>
-        <button class="btn ghost danger-text" data-action="disconnect">Disconnect</button>
+  /* settings: live accounts */
+  let revealed = null, revealTimer = null, submitting = false, panelMode = null, editPrefill = null;
+  const WT = L.WALLET_TYPES;
+  const secretInput = (name, label, placeholder, help, value = "") => `<label class="field"><span>${label}</span><div class="reveal-wrap"><input type="password" name="${name}" value="${esc(value)}" placeholder="${esc(placeholder)}" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"><button type="button" class="eye" data-eye>Show</button></div>${help ? `<small>${help}</small>` : ""}</label>`;
+  const textInput = (name, label, placeholder, help, value = "") => `<label class="field"><span>${label}</span><input type="text" name="${name}" value="${esc(value)}" placeholder="${esc(placeholder)}" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">${help ? `<small>${help}</small>` : ""}</label>`;
+
+  function accountFormHtml(p) {
+    const editing = !!p?.id;
+    return `<form id="accountForm" autocomplete="off" novalidate>
+      <div class="block-head"><h3>${editing ? "Edit account" : "Add a Polymarket account"}</h3><button type="button" class="btn ghost small" data-action="cancel-form">Cancel</button></div>
+      ${editing ? `<input type="hidden" name="id" value="${esc(p.id)}">` : ""}
+      <label class="toggle-row"><input type="checkbox" data-show-all> Show everything I type</label>
+      ${textInput("label", "Account name", "My Polymarket", "", p?.label)}
+      ${textInput("wallet", "Polymarket wallet address", "0x…", "From your profile menu on polymarket.com. It's the address that holds your pUSD.", p?.wallet)}
+      <label class="field"><span>Wallet type</span><select name="walletType">${[3, 2, 1, 0].map(v => `<option value="${v}" ${Number(p?.walletType ?? 3) === v ? "selected" : ""}>${WT[v]}${v === 3 ? " (most accounts since 2026)" : v === 2 ? " (browser wallet login)" : v === 1 ? " (older email login)" : ""}</option>`).join("")}</select><small>Used for read-only balance checks. Trading detects it automatically.</small></label>
+      <p class="form-section">L1 signer: needed to place orders</p>
+      ${secretInput("privateKey", "Signer private key", "0x… (64 hex characters)", "This is not the API key, secret or passphrase. Leave it empty for a read-only account.", p?.privateKey)}
+      ${textInput("signer", "Signer address", "0x…", "The Signer Address shown next to your API keys. Filled in from the private key if you leave it empty.", p?.signer)}
+      <p class="form-section">L2 CLOB API credentials <em class="opt">optional with a private key</em></p>
+      ${textInput("apiKey", "API key", "01a0a9e4-0d88-…", "", p?.apiKey)}
+      ${secretInput("apiSecret", "API secret", "", "", p?.apiSecret)}
+      ${secretInput("apiPassphrase", "API passphrase", "", "With a private key you can leave these empty and they're created automatically. Builder API keys are a different thing and won't work here.", p?.apiPassphrase)}
+      <p class="form-section">Relayer <em class="opt">optional</em></p>
+      ${secretInput("relayerKey", "Relayer API key", "", "Lets BlueEdge set up trading approvals without gas.", p?.relayerKey)}
+      ${textInput("relayerAddress", "Relayer address", "0x…", "", p?.relayerAddress)}
+      <p class="form-section">Protect this account</p>
+      ${secretInput("passcode", "Passcode", "At least 8 characters", editing ? "Enter the current passcode or a new one." : "You'll type this to unlock the account.")}
+      ${secretInput("passcode2", "Confirm passcode", "", "")}
+      <button class="btn primary big" type="submit">${editing ? "Save changes" : "Save account"}</button>
+      <p class="hint">Saving works even when Polymarket can't be reached. Keys are encrypted and stay on this device.</p>
+    </form>`;
+  }
+
+  function revealHtml(a) {
+    if (revealed && revealed.id === a.id) {
+      const row = (label, value) => value ? `<div class="secret"><span>${esc(label)}</span><code>${esc(value)}</code><button class="btn small" data-copy="${esc(value)}">Copy</button></div>` : "";
+      return `<div class="secrets">
+        ${row("Wallet address", revealed.wallet)}
+        <div class="secret"><span>Wallet type</span><code>${esc(WT[revealed.walletType] || revealed.walletType)}</code></div>
+        ${row("Signer address", revealed.signer)}
+        ${row("Signer private key", revealed.privateKey) || `<div class="secret"><span>Signer private key</span><code>Not saved (read-only)</code></div>`}
+        ${row(`CLOB API key${revealed.credsSource ? ` (${revealed.credsSource})` : ""}`, revealed.apiKey)}
+        ${row("CLOB API secret", revealed.apiSecret)}
+        ${row("CLOB API passphrase", revealed.apiPassphrase)}
+        ${row("Relayer API key", revealed.relayerKey)}
+        ${row("Relayer address", revealed.relayerAddress)}
+        <div class="btn-row"><button class="btn" data-action="edit-account">Edit account</button><button class="btn ghost" data-action="hide-secrets">Hide</button></div>
+        <p class="hint">Hidden again in 2 minutes.</p>
       </div>`;
+    }
+    return `<form id="revealForm" autocomplete="off" novalidate class="reveal-form">
+      ${secretInput("passcode", "Passcode to view or edit keys", "", "")}
+      <button class="btn ghost" type="submit">View all keys and addresses</button>
+    </form>`;
+  }
+
+  function checksHtml() {
+    const st = L.state;
+    if (!st.checks.length && !st.checking) return "";
+    const icon = ok => ok === true ? "✓" : ok === false ? "✕" : "?";
+    return `<ul class="check-list">${st.checks.map(c => `<li class="${c.ok === true ? "ok" : c.ok === false ? "bad" : "unknown"}"><i>${icon(c.ok)}</i><div><b>${esc(c.name)}</b><span>${esc(c.detail || "")}</span></div></li>`).join("")}${st.checking ? `<li class="unknown"><i class="loader tiny"></i><div><b>Checking…</b></div></li>` : ""}</ul>`;
+  }
+
+  function activeHtml() {
+    const a = L.active(); if (!a) return "";
+    const st = L.state;
+    if (!L.isUnlocked()) return `<div class="acct-detail">
+      <h4>${esc(a.label)}</h4>
+      <form id="unlockForm" autocomplete="off" novalidate>
+        ${secretInput("passcode", "Passcode", "", "")}
+        ${st.message && st.status !== "unlocking" ? `<p class="form-error">${esc(st.message)}</p>` : ""}
+        <button class="btn primary big" type="submit">${st.status === "unlocking" ? esc(st.message || "Unlocking…") : "Unlock"}</button>
+      </form>
+      ${revealHtml(a)}
+    </div>`;
+    const acct = st.account || {};
+    return `<div class="acct-detail">
+      <h4>${esc(a.label)} <span class="tag ${st.canTrade ? "won" : ""}">${st.canTrade ? "Unlocked, can trade" : "Unlocked, read-only"}</span></h4>
+      ${st.message ? `<p class="notice">${esc(st.message)}</p>` : ""}
+      <dl class="kv plain">
+        <div><dt>Cash</dt><dd>${st.balance == null ? (st.refreshing ? "Loading…" : "—") : esc(money(st.balance))}</dd></div>
+        <div><dt>Mode</dt><dd>${st.mode === "sdk" ? "L1 + L2" : "L2 read-only"}</dd></div>
+        <div><dt>Wallet</dt><dd class="copyable" data-copy="${esc(a.wallet)}">${esc(shortAddr(a.wallet))}</dd></div>
+        <div><dt>Signer</dt><dd class="copyable" data-copy="${esc(acct.signer || a.signer || "")}">${esc(shortAddr(acct.signer || a.signer))}</dd></div>
+        <div><dt>Wallet type</dt><dd>${esc(WT[acct.walletType] ?? String(acct.walletType ?? "—"))}</dd></div>
+        <div><dt>Updated</dt><dd>${st.lastRefresh ? esc(ago(st.lastRefresh)) : "—"}</dd></div>
+      </dl>
+      <div class="btn-row">
+        <button class="btn primary" data-action="check-account" ${st.checking ? "disabled" : ""}>Check balance and connection</button>
+        <button class="btn ghost" data-action="lock">Lock</button>
+      </div>
+      ${checksHtml()}
+      ${st.approvalsMissing && a.hasRelayer ? `<button class="btn" data-action="setup-approvals">Set up trading approvals</button>` : ""}
+      ${revealHtml(a)}
+    </div>`;
+  }
+
+  function livePanelHtml() {
+    if (panelMode) return accountFormHtml(editPrefill);
+    const all = L.list(), act = L.state.activeId;
+    const rowsHtml = all.length ? `<div class="acct-list">${all.map(a => `<div class="acct ${a.id === act ? "active" : ""}">
+        <div class="acct-main"><b>${esc(a.label)}</b><span>${esc(shortAddr(a.wallet))}, ${a.hasKey ? "can trade" : "read-only"}${a.id === act ? (L.isUnlocked() ? ", unlocked" : ", locked") : ""}</span></div>
+        <div class="acct-actions">${a.id === act ? `<span class="tag">In use</span>` : `<button class="btn small" data-use-account="${esc(a.id)}">Use</button>`}<button class="btn small ghost danger-text" data-remove-account="${esc(a.id)}">Remove</button></div>
+      </div>`).join("")}</div>` : `<p class="hint" style="margin-top:0">No live accounts yet. Add one to trade real money. Paper mode never needs an account.</p>`;
+    return `<div class="block-head"><h3>Live accounts</h3></div>
+      ${rowsHtml}
+      <div class="btn-row">
+        <button class="btn primary" data-action="add-account">Add account</button>
+        <button class="btn ghost" data-action="import-account">Load file</button>
+        ${all.length ? `<button class="btn ghost" data-action="export-account">Save all to file</button>` : ""}
+      </div>
+      ${activeHtml()}`;
   }
 
   function drawSettings() {
-    const panel = $("#livePanel");
-    const sig = [L.state.status, L.isUnlocked(), !!revealed, L.state.balance, L.state.stream, L.state.account?.walletType, JSON.stringify(L.vaultInfo())].join("|");
-    const typing = panel.contains(document.activeElement) && document.activeElement.tagName === "INPUT";
+    const panel = $("#livePanel"), st = L.state;
+    const sig = panelMode ? `form|${panelMode}|${editPrefill?.id || ""}` :
+      [st.status, st.message, L.isUnlocked(), st.canTrade, st.balance, st.refreshing, st.stream, st.activeId, st.approvalsMissing, st.checking, JSON.stringify(st.checks), revealed?.id || "", Math.floor((Date.now() - st.lastRefresh) / 10000), JSON.stringify(L.list())].join("|");
+    const typing = panel.contains(document.activeElement) && /INPUT|SELECT/.test(document.activeElement.tagName);
     if (panel._sig !== sig && !typing && !submitting) { panel.innerHTML = livePanelHtml(); panel._sig = sig; }
     $$("[data-seg='botMode'] button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.v === account.botMode)));
     const sb = $("#startInput"); if (document.activeElement !== sb && !sb.value) sb.value = String(Math.round(account.cash * 100) / 100);
     const rs = $("#refreshSelect"); if (rs.value !== String(account.refreshSec)) rs.value = String(account.refreshSec);
     const s = D.state.status, now = Date.now();
     const perMin = s.requestLog.filter(t => now - t < 60000).length;
-    const label = st => ({ live: "Connected", empty: "Connected", loading: "Loading", connecting: "Connecting", reconnecting: "Reconnecting", error: "Error", idle: "Locked", offline: "Off" }[st] || st);
-    const cls = st => (st === "live" || st === "empty" ? "good" : st === "error" ? "bad" : st === "offline" ? "" : "warn");
+    const label = x => ({ live: "Connected", empty: "Connected", loading: "Loading", connecting: "Connecting", reconnecting: "Reconnecting", error: "Error", idle: "Locked", offline: "Off" }[x] || x);
+    const cls = x => (x === "live" || x === "empty" ? "good" : x === "error" ? "bad" : x === "offline" ? "" : "warn");
     const rows = [
       [s.gamma, "Polymarket markets", s.lastDiscovery ? `${s.gammaMsg}. Checked ${Math.round((now - s.lastDiscovery) / 1000)}s ago, ${perMin} request${perMin === 1 ? "" : "s"} in the last minute.` : s.gammaMsg || "Starting up"],
-      [s.poly, "Polymarket live prices", `${s.polyTokens} outcome prices streaming.`],
+      [s.poly, "Polymarket order books", `${s.polyTokens} outcome prices streaming, with a REST refresh for any that go quiet.`],
+      [s.chainlink, "Chainlink prices (price to beat)", "Polymarket's live oracle feed that 5 and 15 minute markets resolve on."],
       [s.binance, "Binance feed", s.binanceHost ? `Using ${s.binanceHost}. Falls back to other Binance hosts automatically.` : "Starts once markets are found."],
-      [L.isUnlocked() ? (L.state.stream === "live" ? "live" : "connecting") : L.hasVault() ? "idle" : "offline", "Live account", L.isUnlocked() ? "Balance and orders update from Polymarket's user stream, with a 30 second backup refresh." : L.hasVault() ? "Connected but locked." : "Not connected."]
+      [L.isUnlocked() ? (L.canTrade() && L.state.stream !== "live" ? "connecting" : "live") : L.hasVault() ? "idle" : "offline", "Live account", L.isUnlocked() ? (L.canTrade() ? "L1 + L2 connected. Updates stream from Polymarket, with a backup refresh every 20 seconds." : "L2 read-only. Balance and orders refresh every 15 seconds.") : L.hasVault() ? "Saved and locked." : "Not connected."]
     ];
-    html($("#connList"), rows.map(([st, name, detail]) => `<li><i class="dot ${cls(st)}"></i><div><b>${name}</b> <span class="tag-lite">${label(st)}</span><p>${esc(detail)}</p></div></li>`).join(""));
+    html($("#connList"), rows.map(([x, name, detail]) => `<li><i class="dot ${cls(x)}"></i><div><b>${name}</b> <span class="tag-lite">${label(x)}</span><p>${esc(detail)}</p></div></li>`).join(""));
   }
 
   /* ---------- toasts ---------- */
@@ -815,6 +902,16 @@
       return;
     }
     if ((el = q("[data-mode]"))) return setMode(el.dataset.mode);
+    if ((el = q("[data-eye]"))) { const inp = el.previousElementSibling; inp.type = inp.type === "password" ? "text" : "password"; el.textContent = inp.type === "password" ? "Show" : "Hide"; return; }
+    if ((el = q("[data-use-account]"))) { if (botOn && isLive()) { botOn = false; write(K.bot, false); } revealed = null; await L.setActive(el.dataset.useAccount); toast("Account selected. Unlock it with its passcode.", "info"); return render(); }
+    if ((el = q("[data-remove-account]"))) {
+      const acc = L.list().find(x => x.id === el.dataset.removeAccount);
+      if (!acc || !confirm(`Remove "${acc.label}" from this device?\n\nSave all accounts to a file first if you want to load it again later.`)) return;
+      if (acc.id === L.state.activeId && isLive()) { botOn = false; write(K.bot, false); }
+      revealed = null; await L.remove(acc.id);
+      if (!L.hasVault() && isLive()) { mode = "paper"; write(K.mode, mode); }
+      toast(`Removed ${acc.label}.`, "info"); return render();
+    }
     if ((el = q("[data-coin]"))) { ui.chartCoin = el.dataset.coin; ui.chartMarket = null; saveUi(); return draw(); }
     if ((el = q("[data-interval]"))) { ui.chartInterval = el.dataset.interval; saveUi(); return draw(); }
     if ((el = q("[data-open-sheet]"))) return openSheet(el.dataset.openSheet);
@@ -844,15 +941,16 @@
         saveUi(); closeSheet(); location.hash = "#chart"; return;
       }
       case "import-account": return $("#accountFile").click();
-      case "export-account": try { L.exportFile(); toast("Encrypted account file saved to this device.", "good"); } catch (err) { toast(err.message, "bad"); } return;
+      case "export-account": try { const n = L.exportFile(); toast(`Saved ${n} encrypted account${n === 1 ? "" : "s"} to a JSON file on this device.`, "good"); } catch (err) { toast(err.message, "bad"); } return;
       case "lock":
         if (botOn && isLive()) { botOn = false; write(K.bot, false); }
         revealed = null; await L.lock(); toast("Live account locked.", "info"); return render();
-      case "disconnect":
-        if (!confirm("Disconnect this account from this device?\n\nYour keys are removed from BlueEdge. Download the account file first if you want to load it again later.")) return;
-        if (isLive()) { botOn = false; write(K.bot, false); mode = "paper"; write(K.mode, mode); }
-        revealed = null; liveFormError = ""; await L.disconnect(); toast("Account disconnected. You can connect a new one now.", "info"); return render();
-      case "hide-secrets": revealed = null; clearTimeout(revealTimer); return render();
+      case "hide-secrets": revealed = null; clearTimeout(revealTimer); $("#livePanel")._sig = null; return render();
+      case "add-account": panelMode = "add"; editPrefill = null; revealed = null; $("#livePanel")._sig = null; draw(); $("#livePanel").scrollIntoView({ block: "start", behavior: "smooth" }); return;
+      case "edit-account": if (!revealed) return; panelMode = "edit"; editPrefill = revealed; $("#livePanel")._sig = null; draw(); $("#livePanel").scrollIntoView({ block: "start", behavior: "smooth" }); return;
+      case "cancel-form": panelMode = null; editPrefill = null; $("#livePanel")._sig = null; return draw();
+      case "check-account": try { toast("Checking your account…", "info"); await L.check(); const bad = L.state.checks.filter(c => c.ok === false).length; toast(bad ? `${bad} check${bad > 1 ? "s" : ""} need attention.` : "Everything checked out.", bad ? "bad" : "good"); } catch (err) { toast(err.message, "bad"); } return;
+      case "setup-approvals": try { toast("Setting up trading approvals…", "info"); await L.setupApprovals(); toast("Trading approvals submitted. Run the check again in a minute.", "good"); } catch (err) { toast(err.message, "bad"); } return;
     }
 
     if ((el = q(".sheet .side")) && sheet) { sheet.side = el.dataset.side; return updateSheet(); }
@@ -867,52 +965,62 @@
     if ((el = q("[data-seg='botMode'] button"))) { reloadBook(); account.botMode = el.dataset.v; saveAccount(); offered.clear(); return render(); }
   });
 
+  document.addEventListener("change", e => {
+    if (e.target.matches?.("[data-show-all]")) {
+      const form = e.target.closest("form");
+      $$("input[type=password], input[data-was-password]", form).forEach(i => { i.dataset.wasPassword = "1"; i.type = e.target.checked ? "text" : "password"; });
+      $$("[data-eye]", form).forEach(b => { b.textContent = e.target.checked ? "Hide" : "Show"; });
+    }
+  });
+
   document.addEventListener("submit", async e => {
     const form = e.target;
-    if (!["connectForm", "unlockForm", "revealForm"].includes(form.id)) return;
+    if (!["accountForm", "unlockForm", "revealForm"].includes(form.id)) return;
     e.preventDefault();
     const data = Object.fromEntries(new FormData(form).entries());
-    const btn = form.querySelector("[type=submit]");
-    const btnText = btn.textContent;
-    btn.disabled = true;
-    btn.textContent = form.id === "connectForm" ? "Connecting to Polymarket…" : form.id === "unlockForm" ? "Unlocking…" : "Checking…";
-    form.querySelector(".form-error")?.remove();
-    submitting = true;
-    liveFormError = "";
+    const btn = form.querySelector("[type=submit]"), btnText = btn.textContent;
+    form.querySelectorAll(".form-error").forEach(x => x.remove());
+    btn.disabled = true; submitting = true;
+    btn.textContent = form.id === "accountForm" ? "Saving…" : form.id === "unlockForm" ? "Unlocking…" : "Checking passcode…";
+    let rerender = false, unlockAfter = null;
     try {
-      if (form.id === "connectForm") {
-        if (data.passcode !== data.passcode2) throw new Error("The passcodes don't match.");
-        await L.connect(data);
-        toast("Account connected and unlocked.", "good");
+      if (form.id === "accountForm") {
+        if (editPrefill?.passcode) data.oldPasscode = editPrefill.passcode;
+        const meta = await L.save(data);
+        panelMode = null; editPrefill = null; revealed = null; rerender = true;
+        toast(`Saved "${meta.label}" on this device.`, "good");
+        unlockAfter = { id: meta.id, passcode: data.passcode };
       } else if (form.id === "unlockForm") {
-        await L.unlock(data.passcode);
-        toast("Live account unlocked.", "good");
+        await L.unlock(L.state.activeId, data.passcode);
+        toast(L.canTrade() ? "Unlocked. This account can trade." : `Unlocked read-only. ${L.state.message || ""}`, L.canTrade() ? "good" : "info");
+        rerender = true;
       } else {
-        revealed = await L.reveal(data.passcode);
+        revealed = { ...(await L.reveal(L.state.activeId, data.passcode)), passcode: data.passcode };
         clearTimeout(revealTimer);
-        revealTimer = setTimeout(() => { revealed = null; render(); }, 60000);
+        revealTimer = setTimeout(() => { revealed = null; $("#livePanel")._sig = null; render(); }, 120000);
+        rerender = true;
       }
-      liveFormError = "";
-      $("#livePanel")._sig = null;
-      if (document.activeElement?.blur) document.activeElement.blur();
     } catch (err) {
-      // keep what the user typed: show the error inside the current form instead of re-rendering it
-      const live = document.getElementById(form.id) || form;
-      let box = live.querySelector(".form-error");
-      if (!box) { box = document.createElement("p"); box.className = "form-error"; live.querySelector("[type=submit]").before(box); }
-      box.textContent = err.message;
+      const box = document.createElement("p");
+      box.className = "form-error"; box.textContent = err.message;
+      btn.before(box);
       box.scrollIntoView({ block: "nearest", behavior: "smooth" });
     } finally {
-      submitting = false;
-      btn.disabled = false; btn.textContent = btnText;
+      submitting = false; btn.disabled = false; btn.textContent = btnText;
+      if (rerender) { $("#livePanel")._sig = null; document.activeElement?.blur?.(); }
       render();
+    }
+    if (unlockAfter) {
+      try { await L.unlock(unlockAfter.id, unlockAfter.passcode); toast(L.canTrade() ? "Connected. This account can trade." : `Connected read-only. ${L.state.message || ""}`, L.canTrade() ? "good" : "info"); }
+      catch (err) { toast(err.message, "bad"); }
+      $("#livePanel")._sig = null; render();
     }
   });
 
   $("#accountFile").addEventListener("change", async e => {
     const file = e.target.files?.[0]; e.target.value = "";
     if (!file) return;
-    try { const info = await L.importFile(file); toast(`Loaded ${info.label}. Unlock it with its passcode.`, "good"); }
+    try { const r = await L.importFile(file); toast(`Loaded ${r.added} new and updated ${r.updated} account${r.added + r.updated === 1 ? "" : "s"}. Unlock one with its passcode.`, "good"); $("#livePanel")._sig = null; }
     catch (err) { toast(err.message, "bad"); }
     render();
   });
@@ -990,12 +1098,17 @@
   window.addEventListener("resize", () => { if (view === "trades" && !isLive()) drawEquityChart(); });
 
   D.on("markets", render); D.on("books", render); D.on("spot", render); D.on("status", render);
-  D.on("resolved", () => setTimeout(() => settlePaper(true), 20000));
+  D.on("resolved", () => setTimeout(settlePaper, 3000));
+  D.on("resolution", () => { render(); settlePaper(); });
+  // keep the app full screen: block pinch-zoom outside the chart (the chart has its own pinch)
+  ["gesturestart", "gesturechange"].forEach(ev => document.addEventListener(ev, e => { if (!e.target.closest?.(".chart-host")) e.preventDefault(); }, { passive: false }));
+  document.addEventListener("touchmove", e => { if (e.touches.length > 1 && !e.target.closest?.(".chart-host")) e.preventDefault(); }, { passive: false });
   L.on(render);
   C.onUpdate(() => { if (ui.chartMarket) applyChartLine(); });
 
   /* ---------- start ---------- */
   if (mode === "live" && !L.hasVault()) { mode = "paper"; write(K.mode, mode); }
+  setInterval(() => { if (view === "settings") drawSettings(); }, 5000);
   if (botOn && mode === "live") { botOn = false; write(K.bot, false); } // the live bot never resumes on its own after a reload
   watchOpen();
   D.startLoop({ intervalSec: account.refreshSec, keepAliveHidden: () => botOn || openTrades().length > 0 });
