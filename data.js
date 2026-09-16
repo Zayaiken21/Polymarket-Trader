@@ -280,7 +280,7 @@ window.BlueEdgeData = (() => {
   const setInterval_ = sec => { intervalSec = Math.max(20, Number(sec) || 60); };
 
   /* ---------- Polymarket CLOB WebSocket ---------- */
-  const poly = { ws: null, subs: new Set(), want: new Set(), extra: new Set(), retry: 0, ping: null, timer: null };
+  const poly = { last: 0, ws: null, subs: new Set(), want: new Set(), extra: new Set(), retry: 0, ping: null, timer: null };
 
   function wantedTokens() {
     const now = Date.now(), ids = new Set();
@@ -317,9 +317,15 @@ window.BlueEdgeData = (() => {
       ws.send(JSON.stringify({ assets_ids: [...poly.subs], type: "market", custom_feature_enabled: true }));
       state.status.poly = "live"; state.status.polyTokens = poly.subs.size; emit("status");
       clearInterval(poly.ping);
-      poly.ping = setInterval(() => { if (ws.readyState === 1) ws.send("PING"); }, 10000);
+      poly.ping = setInterval(() => {
+        if (ws.readyState !== 1) return;
+        if (Date.now() - poly.last > 35000) { try { ws.close(); } catch {} return; } // silent socket: force reconnect
+        ws.send("PING");
+      }, 10000);
     };
+    poly.last = Date.now();
     ws.onmessage = e => {
+      poly.last = Date.now();
       if (typeof e.data !== "string" || e.data === "PONG") return;
       let d; try { d = JSON.parse(e.data); } catch { return; }
       (Array.isArray(d) ? d : [d]).forEach(handlePoly);
@@ -372,7 +378,7 @@ window.BlueEdgeData = (() => {
 
   /* ---------- Binance WebSocket ---------- */
   const HOST_KEY = "blueedge.binanceHost";
-  const bin = { ws: null, idx: Number(localStorage.getItem(HOST_KEY)) || 0, assets: new Set(), extra: new Set(), subs: new Set(), retry: 0, fails: 0, timer: null, id: 1 };
+  const bin = { last: 0, dog: null, ws: null, idx: Number(localStorage.getItem(HOST_KEY)) || 0, assets: new Set(), extra: new Set(), subs: new Set(), retry: 0, fails: 0, timer: null, id: 1 };
   const streamsFor = a => { const s = a.toLowerCase() + "usdt"; return [`${s}@miniTicker`, `${s}@kline_5m`, `${s}@kline_15m`, `${s}@kline_1h`]; };
 
   function syncBinance() {
@@ -404,7 +410,11 @@ window.BlueEdgeData = (() => {
     bin.ws = ws;
     const probe = setTimeout(() => { if (!got) try { ws.close(); } catch {} }, 10000);
     ws.onopen = () => { bin.subs = new Set(assets); };
+    bin.last = Date.now();
+    clearInterval(bin.dog);
+    bin.dog = setInterval(() => { if (bin.ws === ws && ws.readyState === 1 && Date.now() - bin.last > 30000) { try { ws.close(); } catch {} } }, 5000);
     ws.onmessage = e => {
+      bin.last = Date.now();
       if (!got) {
         got = true; bin.retry = 0; bin.fails = 0;
         localStorage.setItem(HOST_KEY, String(bin.idx % BINANCE_HOSTS.length));
@@ -439,6 +449,14 @@ window.BlueEdgeData = (() => {
       if (!s || Date.now() - s.ts > 1500) state.spot[asset] = { price: +x.k.c, ts: Date.now() };
     }
   }
+
+  function reconnectAll() {
+    if (!poly.ws || poly.ws.readyState > 1) { clearTimeout(poly.timer); poly.timer = null; poly.retry = 0; syncPoly(); }
+    if (!bin.ws || bin.ws.readyState > 1) { clearTimeout(bin.timer); bin.timer = null; bin.retry = 0; syncBinance(); }
+  }
+  window.addEventListener("online", () => { limiter.pauseUntil = 0; reconnectAll(); discover(); });
+  window.addEventListener("offline", () => { state.status.poly = "offline"; state.status.binance = "offline"; emit("status"); });
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) reconnectAll(); });
 
   /* ---------- settlement lookups ---------- */
   async function fetchResolutions(slugs) {

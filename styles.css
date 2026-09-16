@@ -467,3 +467,54 @@ input[type="text"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rg
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
 section[data-view="settings"] > .form-grid:first-child { margin-top: 4px; }
+
+/* ---------- v3 additions: modes, live account, chart ---------- */
+.mode-switch { display: flex; padding: 3px; gap: 2px; border-radius: 999px; background: var(--bg-2); border: 1px solid var(--line-soft); }
+.mode-switch button { min-height: 30px; padding: 0 12px; border-radius: 999px; font-size: 13px; font-weight: 800; color: var(--muted); }
+.mode-switch button[aria-pressed="true"] { background: var(--raised); color: var(--text); }
+.mode-switch button[data-mode="live"][aria-pressed="true"] { background: var(--down); color: #33060C; }
+body.mode-live .topbar { border-bottom-color: rgba(255, 111, 125, .35); }
+.topbar .bot-switch .lbl { min-width: 44px; }
+@media (max-width: 420px) { .topbar .bot-switch .lbl { display: none; } .topbar .bot-switch { padding-right: 4px; } .topbar h1 { font-size: 17px; } }
+
+.live-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; padding: 12px 14px; border-radius: var(--radius); background: rgba(255, 111, 125, .08); border: 1px solid rgba(255, 111, 125, .3); font-size: 14px; }
+.live-banner .btn { margin: 0; flex: none; }
+
+.strategy-box { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line-soft); }
+.strategy-box .field-title:first-child { margin-top: 0; }
+.rules { margin-top: 14px; font-size: 14px; color: var(--muted); }
+.rules summary { cursor: pointer; font-weight: 700; color: var(--accent); min-height: 32px; display: flex; align-items: center; }
+.rules ul { margin: 8px 0 0; padding-left: 18px; line-height: 1.55; }
+.rules li + li { margin-top: 4px; }
+
+.page-head { align-items: center; }
+.chips.intervals button { min-height: 34px; padding: 0 12px; font-size: 13px; }
+.chart-panel { padding: 10px 8px 8px; position: relative; }
+.chart-host { height: min(62dvh, 520px); min-height: 300px; width: 100%; }
+.chart-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; padding: 4px 8px 8px; font-size: 13px; color: var(--muted); font-weight: 600; }
+.chart-legend b { color: var(--text); }
+.chart-legend em { font-style: normal; color: var(--text); }
+.chart-status { position: absolute; inset: 50% 16px auto; transform: translateY(-50%); text-align: center; color: var(--muted); font-size: 14px; }
+.chart-row { cursor: pointer; }
+.chart-row.selected { border-color: var(--accent); background: rgba(77, 163, 255, .08); }
+.chart-row .pos-pnl b { font-size: 13px; }
+
+.field small { display: block; color: var(--faint); font-size: 12px; margin-top: 6px; line-height: 1.45; }
+.field .opt { font-style: normal; color: var(--faint); font-weight: 600; font-size: 12px; margin-left: 6px; }
+input[type="password"] { width: 100%; min-height: 46px; padding: 0 12px; font-size: 16px; font-weight: 700; background: var(--bg-2); border: 1px solid var(--line); border-radius: var(--radius-sm); outline: none; color: var(--text); }
+input[type="password"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(77, 163, 255, .18); }
+.form-error { margin-top: 12px; padding: 10px 12px; border-radius: var(--radius-sm); background: rgba(255, 111, 125, .1); border: 1px solid rgba(255, 111, 125, .35); color: #FFB3BA; font-size: 14px; }
+form .btn.big { width: 100%; }
+.btn-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.btn-row .btn { flex: 1 1 auto; }
+.danger-text { color: var(--down) !important; }
+.panel .notice { margin-top: 14px; }
+.panel h3 .tag { vertical-align: middle; margin-left: 6px; }
+.kv.plain { margin-top: 0; }
+.copyable { cursor: copy; color: var(--accent); }
+.secrets { margin-top: 14px; display: grid; gap: 8px; }
+.secret { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; align-items: center; padding: 10px 12px; border-radius: var(--radius-sm); background: var(--bg-2); border: 1px solid var(--line-soft); }
+.secret span { font-size: 12px; color: var(--faint); font-weight: 700; grid-column: 1; }
+.secret code { grid-column: 1; font-size: 12px; word-break: break-all; color: var(--text); }
+.secret .btn { grid-column: 2; grid-row: 1 / span 2; }
+.tag.won, .tag.lost { font-size: 12px; }
