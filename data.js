@@ -10,6 +10,7 @@ window.BlueEdgeData = (() => {
   const BINANCE_HOSTS = [
     "wss://data-stream.binance.vision/stream",
     "wss://stream.binance.com:9443/stream",
+    "wss://stream.binance.com:443/stream",
     "wss://stream.binance.us:9443/stream"
   ];
   const TIMEFRAMES = [5, 15, 60];
@@ -394,8 +395,8 @@ window.BlueEdgeData = (() => {
   }
 
   /* ---------- Binance WebSocket ---------- */
-  const HOST_KEY = "blueedge.binanceHost";
-  const bin = { last: 0, dog: null, ws: null, idx: Number(localStorage.getItem(HOST_KEY)) || 0, assets: new Set(), extra: new Set(), subs: new Set(), retry: 0, fails: 0, timer: null, id: 1 };
+  try { localStorage.removeItem("blueedge.binanceHost"); } catch {}
+  const bin = { last: 0, dog: null, ws: null, idx: 0, assets: new Set(), extra: new Set(), subs: new Set(), retry: 0, fails: 0, timer: null, id: 1 };
   const streamsFor = a => { const s = a.toLowerCase() + "usdt"; return [`${s}@miniTicker`, `${s}@kline_5m`, `${s}@kline_15m`, `${s}@kline_1h`]; };
 
   function syncBinance() {
@@ -434,7 +435,9 @@ window.BlueEdgeData = (() => {
       bin.last = Date.now();
       if (!got) {
         got = true; bin.retry = 0; bin.fails = 0;
-        localStorage.setItem(HOST_KEY, String(bin.idx % BINANCE_HOSTS.length));
+        const onUS = BINANCE_HOSTS[bin.idx % BINANCE_HOSTS.length].includes("binance.us");
+        // never stay on Binance.US: retry global Binance every 5 minutes
+        if (onUS) setTimeout(() => { if (bin.ws === ws) { bin.idx = 0; bin.fails = 0; try { ws.close(); } catch {} } }, 5 * 60000);
         state.status.binance = "live"; emit("status");
       }
       let d; try { d = JSON.parse(e.data); } catch { return; }

@@ -687,3 +687,17 @@ input[type="text"]:focus, input[type="password"]:focus, .money-field:focus-withi
 @keyframes breathe { 0%, 100% { box-shadow: 0 0 0 3px rgba(46,207,142,.18); } 50% { box-shadow: 0 0 0 6px rgba(46,207,142,.06); } }
 @keyframes blink { to { opacity: .55; } }
 @media (prefers-reduced-motion: reduce) { .mode-card::after, .bot.on, .mc-status.ready, .dot.good, .is-urgent .mc-left { animation: none !important; } }
+
+/* v3.4: tappable trades, detail sheet, chart source badge */
+.tappable { cursor: pointer; position: relative; transition: border-color .2s, background .2s; }
+.pos.tappable:hover, .hrow.tappable:hover { border-color: var(--line); }
+.hrow.tappable:active, .pos.tappable:active { background: rgba(47, 168, 255, .10); }
+.detail-badge { display: inline-block; margin: 14px 0 0; padding: 5px 12px; border-radius: 999px; font-size: 13px; font-weight: 800; background: rgba(47,168,255,.14); color: #BFE9FF; }
+.detail-badge::first-letter { text-transform: uppercase; }
+.detail-badge.gain { background: var(--up-soft); color: var(--up); }
+.detail-badge.loss { background: var(--down-soft); color: var(--down); }
+.kv.detail { margin-top: 14px; }
+.block-head .hint { margin: 0; }
+.chart-legend .src { padding: 1px 8px; border-radius: 999px; background: rgba(47,168,255,.14); color: #BFE9FF; font-size: 12px; }
+.chart-legend .src.warn { background: rgba(242,184,75,.16); color: var(--warn); }
+.pos .tag { grid-area: auto; justify-self: end; white-space: nowrap; }

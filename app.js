@@ -54,6 +54,7 @@
   const signClass = n => (n > 0.004 ? "gain" : n < -0.004 ? "loss" : "");
   const shortAddr = a => a ? `${a.slice(0, 6)}…${a.slice(-4)}` : "—";
   const ago = ms => { const s = Math.round((Date.now() - ms) / 1000); return s < 5 ? "just now" : s < 60 ? `${s}s ago` : `${Math.round(s / 60)}m ago`; };
+  const symFromTitle = t => { const w = String(t || "").trim().split(/\s+/)[0] || "?"; const hit = Object.entries(NAMES).find(([, n]) => n.toLowerCase() === w.toLowerCase()); return hit ? hit[0] : w.slice(0, 4).toUpperCase(); };
   const coinBadge = (a, cls = "") => `<span class="coin ${cls}" style="--coin:${coinColor(a)}">${esc(String(a).slice(0, 4))}</span>`;
 
   /* ---------- money / equity ---------- */
@@ -218,6 +219,73 @@
       <p class="hint center" data-f="note"></p>`;
     $("#sheet").classList.add("open"); $("#backdrop").classList.add("open"); document.body.classList.add("sheet-open");
     updateSheet();
+  }
+  const polyUrl = (slug, eventSlug) => (slug || eventSlug ? `https://polymarket.com/event/${eventSlug || slug}` : null);
+  const when = ms => ms ? new Date(ms).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "";
+  const toMs = raw => raw == null || raw === "" ? null : isNaN(raw) ? Date.parse(raw) : Number(raw) * (String(Math.floor(Number(raw))).length <= 10 ? 1000 : 1);
+  function openDetail(d) {
+    sheet = null;
+    $("#sheet").innerHTML = `
+      <div class="sheet-grip" aria-hidden="true"></div>
+      <div class="sheet-head">${coinBadge(d.asset || "?")}
+        <div><h2 id="sheetTitle">${esc(d.title)}</h2><p class="muted">${esc(d.subtitle || "")}</p></div>
+        <button class="icon-btn" data-action="close-sheet" aria-label="Close">✕</button></div>
+      ${d.badge ? `<p class="detail-badge ${d.badgeClass || ""}">${esc(d.badge)}</p>` : ""}
+      <dl class="kv detail">${d.rows.filter(r => r[1] != null && r[1] !== "").map(([k, v, c]) => `<div><dt>${esc(k)}</dt><dd class="${c || ""}">${esc(v)}</dd></div>`).join("")}</dl>
+      <div class="sheet-actions">${d.actions || ""}${d.url ? `<a class="btn ghost" href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">Open on Polymarket</a>` : ""}</div>`;
+    $("#sheet").classList.add("open"); $("#backdrop").classList.add("open"); document.body.classList.add("sheet-open");
+  }
+  function paperDetail(id) {
+    const t = trades.find(x => x.id === id); if (!t) return;
+    const m = D.state.markets.get(t.marketId), now = Date.now();
+    if (t.status === "open" && m && m.end > now) return openSheet(m.id, t.side);
+    const res = D.resolutionFor(t.marketId), bid = D.bookFor(t.token).bid;
+    const statusText = t.status === "open" ? (t.end > now ? "Open" : "Waiting for result") : t.status === "won" ? "Won" : t.status === "lost" ? "Lost" : t.note || t.status;
+    openDetail({
+      asset: t.asset, title: `${coinName(t.asset)} ${S.tfName(t.tf)}, ${t.side}`, subtitle: `Paper trade opened ${when(t.openedAt)}`,
+      badge: statusText, badgeClass: t.status === "won" ? "gain" : t.status === "lost" ? "loss" : "",
+      rows: [["Shares", t.shares.toFixed(2)], ["Entry price", cents(t.entry)], ["Cost", money(t.cost)], ["Fees", money((t.fee || 0) + (t.exitFee || 0))],
+        ["Exit price", t.exit != null ? cents(t.exit) : t.status === "open" ? `now ${cents(bid)}` : "—"], ["P/L", t.pnl != null ? money(t.pnl, true) : "—", signClass(t.pnl)],
+        ["Window", `${new Date(t.start).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} – ${new Date(t.end).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`],
+        ["Resolved", res ? `${res.winner}${res.official ? " (official)" : " (estimated)"}` : t.status === "open" ? "Not yet" : (t.note || "—")], ["Placed by", t.source === "bot" ? "Bot" : "You"]],
+      url: t.url
+    });
+  }
+  function livePositionDetail(token) {
+    const p = L.state.positions.find(x => String(x.assetId ?? x.tokenId) === token); if (!p) return;
+    const d = describeToken(token, tokenIndex()), now = Date.now();
+    if (d?.m && d.m.end > now) return openSheet(d.m.id, d.m.upToken === token ? "Up" : "Down");
+    const size = Number(p.currentSize ?? p.size ?? 0), value = Number(p.currentValue || 0), cost = Number(p.totalCostUsdc ?? size * Number(p.avgPrice || 0));
+    openDetail({
+      asset: d?.asset || symFromTitle(p.title), title: d?.label || p.title || "Position", subtitle: p.outcome ? `Outcome: ${p.outcome}` : "Live position",
+      badge: p.redeemable ? "Resolved: Polymarket redeems it automatically" : "Open position",
+      rows: [["Shares", size.toFixed(2)], ["Avg price", cents(Number(p.avgPrice))], ["Current price", cents(Number(p.currentPrice))], ["Value", money(value)], ["Cost", money(cost)], ["P/L", money(value - cost, true), signClass(value - cost)], ["Ends", p.endDate ? when(toMs(p.endDate)) : ""]],
+      url: polyUrl(p.slug, p.eventSlug)
+    });
+  }
+  function liveOrderDetail(id) {
+    const o = L.state.orders.find(x => String(x.id) === id); if (!o) return;
+    const d = describeToken(o.assetId ?? o.tokenId, tokenIndex());
+    openDetail({
+      asset: d?.asset || "?", title: `${o.side} ${d?.label || o.outcome || "order"}`, subtitle: "Open order on your live account", badge: String(o.status || "open").toLowerCase(),
+      rows: [["Limit price", cents(Number(o.price))], ["Size", Number(o.originalSize || 0).toFixed(2)], ["Filled", Number(o.sizeMatched || 0).toFixed(2)], ["Value", money(Number(o.originalSize || 0) * Number(o.price || 0))], ["Type", o.orderType || ""], ["Order ID", o.id]],
+      actions: `<button class="btn danger" data-cancel="${esc(o.id)}">Cancel order</button>`,
+      url: d?.m?.url
+    });
+  }
+  function liveFillDetail(i) {
+    const t = L.state.trades[i]; if (!t) return;
+    const d = describeToken(t.assetId ?? t.tokenId ?? t.asset_id, tokenIndex());
+    openDetail({ asset: d?.asset || "?", title: `${t.side || ""} ${d?.label || t.outcome || "Fill"}`, subtitle: when(toMs(t.matchTime || t.createdAt || t.timestamp)), badge: String(t.status || "filled").replace("TRADE_STATUS_", "").toLowerCase(),
+      rows: [["Shares", Number(t.size || 0).toFixed(2)], ["Price", cents(Number(t.price))], ["Value", money(Number(t.size || 0) * Number(t.price || 0))], ["Outcome", t.outcome || d?.label || ""]], url: d?.m?.url });
+  }
+  function liveClosedDetail(i) {
+    const c = L.state.closed[i]; if (!c) return;
+    const d = describeToken(c.assetId, tokenIndex());
+    openDetail({ asset: d?.asset || symFromTitle(c.title), title: c.title || d?.label || "Closed position", subtitle: when(toMs(c.timestamp)),
+      badge: Number(c.realizedPnl) >= 0 ? "Closed in profit" : "Closed at a loss", badgeClass: signClass(Number(c.realizedPnl)),
+      rows: [["Outcome", c.outcome || ""], ["Avg price", cents(Number(c.avgPrice))], ["Shares bought", Number(c.totalBought || 0).toFixed(2)], ["Final price", cents(Number(c.currentPrice))], ["Realized P/L", money(Number(c.realizedPnl || 0), true), signClass(Number(c.realizedPnl))]],
+      url: polyUrl(c.slug, c.eventSlug) });
   }
   function closeSheet() { sheet = null; $("#sheet").classList.remove("open"); $("#backdrop").classList.remove("open"); document.body.classList.remove("sheet-open"); }
   function updateSheet() {
@@ -452,7 +520,8 @@
     if (next === "live" && !L.hasVault()) { toast("Connect a Polymarket account first.", "info"); location.hash = "#settings"; return; }
     mode = next; write(K.mode, mode);
     if (botOn) { botOn = false; write(K.bot, false); toast("Bot turned off while switching accounts.", "info"); }
-    if (mode === "live" && L.isUnlocked()) L.refresh(true);
+    if (mode === "live" && L.isUnlocked()) { L.refresh(true); toast(`Showing ${L.active()?.label || "your live account"}.`, "info"); }
+    else if (mode === "live") toast("Live mode: unlock your account to load its trades.", "info");
     render();
   }
   function watchOpen() { const open = openTrades(); D.watch({ tokens: open.map(t => t.token), assets: open.map(t => t.asset) }); }
@@ -559,7 +628,41 @@
     $$("[data-chips]").forEach(g => { const val = String(ui[g.dataset.chips]); $$("button", g).forEach(b => b.setAttribute("aria-pressed", String(b.dataset.v === val))); });
   }
 
+  function resetContainer(el, key) { if (el._modeKey !== key) { el.innerHTML = ""; el._nodes = null; el._html = null; el._modeKey = key; } }
+  function liveRowsHtml(limit) {
+    const st = L.state, idx = tokenIndex(), now = Date.now();
+    const pos = st.positions.map(p => {
+      const token = String(p.assetId ?? p.tokenId), d = describeToken(token, idx);
+      const size = Number(p.currentSize ?? p.size ?? 0), value = Number(p.currentValue || 0), cost = Number(p.totalCostUsdc ?? size * Number(p.avgPrice || 0)), ended = d?.m ? d.m.end <= now : !!p.redeemable;
+      return `<div class="pos tappable" data-live-pos="${esc(token)}">${coinBadge(d?.asset || symFromTitle(p.title))}<div class="pos-main"><b>${esc(d?.label || p.title || p.outcome || shortAddr(token))}</b><span>${size.toFixed(2)} shares, avg ${cents(Number(p.avgPrice))}, now ${cents(Number(p.currentPrice))}</span></div>
+        <div class="pos-pnl"><b class="${signClass(value - cost)}">${money(value - cost, true)}</b><span>${money(value)}</span></div>
+        ${d && !ended ? `<button class="btn small" data-live-sell="${esc(token)}">Sell</button>` : `<span class="tag">${ended ? "Resolved" : "Held"}</span>`}</div>`;
+    });
+    const ords = st.orders.map(o => {
+      const d = describeToken(o.assetId ?? o.tokenId, idx);
+      return `<div class="pos tappable" data-live-order="${esc(o.id)}">${coinBadge(d?.asset || "?")}<div class="pos-main"><b>${esc(o.side)} ${esc(d?.label || o.outcome || "Order")}</b><span>${Number(o.sizeMatched || 0).toFixed(2)} of ${Number(o.originalSize || 0).toFixed(2)} filled at ${cents(Number(o.price))}</span></div>
+        <div class="pos-pnl"><b>${money(Number(o.originalSize || 0) * Number(o.price || 0))}</b><span>open order</span></div><button class="btn small" data-cancel="${esc(o.id)}">Cancel</button></div>`;
+    });
+    return { pos: limit ? pos.slice(0, limit) : pos, ords, count: pos.length + ords.length };
+  }
+  function drawHomeOpen() {
+    const box = $("#homeOpen");
+    if (isLive()) {
+      resetContainer(box, "live");
+      const r = L.isUnlocked() ? liveRowsHtml(6) : { pos: [], ords: [], count: 0 };
+      $("#homeOpenBlock").hidden = !r.count;
+      set($("#homeOpenTitle"), `Open on your live account (${r.count})`);
+      html(box, [...r.ords, ...r.pos].join(""));
+    } else {
+      resetContainer(box, "paper");
+      const open = openTrades();
+      $("#homeOpenBlock").hidden = !open.length;
+      set($("#homeOpenTitle"), `Open paper trades (${open.length})`);
+      keyed(box, open, t => t.id, createPos, updatePos, "");
+    }
+  }
   function drawHome() {
+    drawHomeOpen();
     syncChips();
     const now = Date.now();
     const list = liveMarkets(now).filter(m => ui.homeTf === "all" || m.tf === Number(ui.homeTf)).map(m => vm(m, now))
@@ -632,7 +735,8 @@
   /* positions */
   function createPos(t) {
     const el = document.createElement("div");
-    el.className = "pos";
+    el.className = "pos tappable";
+    el.dataset.paperTrade = t.id;
     el.innerHTML = `${coinBadge(t.asset)}<div class="pos-main"><b>${esc(t.asset)} ${tfShort(t.tf)} <em class="${t.side === "Up" ? "gain" : "loss"}">${esc(t.side)}</em></b><span data-f="sub"></span></div>
       <div class="pos-pnl"><b data-f="pnl"></b><span data-f="left"></span></div><button class="btn small" data-sell="${t.id}">Sell</button>`;
     return el;
@@ -660,7 +764,7 @@
     if (hist._sig !== sig) {
       hist._sig = sig;
       hist.innerHTML = closed.length ? closed.slice().reverse().slice(0, 200).map(t => `
-        <div class="hrow">${coinBadge(t.asset, "sm")}
+        <div class="hrow tappable" data-paper-trade="${t.id}">${coinBadge(t.asset, "sm")}
           <div class="h-main"><b>${esc(t.asset)} ${tfShort(t.tf)} ${esc(t.side)}</b><span>${new Date(t.openedAt).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}. ${cents(t.entry)} → ${cents(t.exit)}</span></div>
           <span class="tag ${t.status}">${t.status === "won" ? "Won" : t.status === "lost" ? "Lost" : esc(t.note || "Sold")}</span>
           <b class="h-pnl ${signClass(t.pnl)}">${money(t.pnl, true)}</b></div>`).join("") : `<div class="empty"><p>Closed paper trades show up here.</p></div>`;
@@ -676,8 +780,8 @@
     const st = L.state;
     if (!L.isUnlocked()) {
       const msg = `<div class="empty"><p>${L.hasVault() ? "Unlock your live account to load orders." : "Connect a Polymarket account in Settings."}</p><a class="btn small" href="#settings">Go to Settings</a></div>`;
-      ["#liveOrders", "#livePositions", "#liveFills"].forEach(s => html($(s), msg));
-      set($("#lBalance"), "—"); set($("#lPosValue"), "—"); set($("#lOrderCount"), "0"); set($("#lUpdated"), "—");
+      ["#liveOrders", "#livePositions", "#liveFills", "#liveClosed"].forEach(x => html($(x), msg));
+      set($("#lBalance"), "—"); set($("#lPosValue"), "—"); set($("#lOrderCount"), "0"); set($("#lRealized"), "—"); set($("#lUpdated"), "");
       $("#cancelAllBtn").disabled = true;
       return;
     }
@@ -685,31 +789,23 @@
     set($("#lBalance"), st.balance == null ? "—" : money(st.balance));
     set($("#lPosValue"), money(st.positions.reduce((s, p) => s + Number(p.currentValue || 0), 0)));
     set($("#lOrderCount"), String(st.orders.length));
-    set($("#lUpdated"), st.lastRefresh ? ago(st.lastRefresh) : "—");
+    set($("#lUpdated"), st.lastRefresh ? `Updated ${ago(st.lastRefresh)}` : "");
     $("#cancelAllBtn").disabled = !st.orders.length;
 
-    html($("#liveOrders"), st.orders.length ? st.orders.map(o => {
-      const d = describeToken(o.assetId ?? o.tokenId, idx);
-      const filled = Number(o.sizeMatched || 0), size = Number(o.originalSize || 0);
-      return `<div class="pos">${coinBadge(d?.asset || "?")}<div class="pos-main"><b>${esc(o.side)} ${esc(d?.label || o.outcome || "Order")}</b><span>${filled.toFixed(2)} of ${size.toFixed(2)} filled at ${cents(Number(o.price))}</span></div>
-        <div class="pos-pnl"><b>${money(size * Number(o.price))}</b><span>${esc(o.orderType || "")} ${esc(String(o.status || "").toLowerCase())}</span></div><button class="btn small" data-cancel="${esc(o.id)}">Cancel</button></div>`;
-    }).join("") : `<div class="empty"><p>No open orders. Bot orders fill immediately or cancel, so they rarely stay open.</p></div>`);
-
-    html($("#livePositions"), st.positions.length ? st.positions.map(p => {
-      const token = String(p.assetId ?? p.tokenId), d = describeToken(token, idx);
-      const size = Number(p.currentSize ?? p.size ?? 0), value = Number(p.currentValue || 0), cost = Number(p.totalCostUsdc ?? p.entryCostUsdc ?? size * Number(p.avgPrice || 0));
-      const pnl = value - cost, ended = d?.m ? d.m.end <= Date.now() : false;
-      return `<div class="pos">${coinBadge(d?.asset || "?")}<div class="pos-main"><b>${esc(d?.label || p.title || p.outcome || shortAddr(token))}</b><span>${size.toFixed(2)} shares, avg ${cents(Number(p.avgPrice))}, now ${cents(Number(p.currentPrice))}</span></div>
-        <div class="pos-pnl"><b class="${signClass(pnl)}">${money(pnl, true)}</b><span>${money(value)}</span></div>
-        ${d && !ended ? `<button class="btn small" data-live-sell="${esc(token)}">Sell</button>` : `<span class="tag">${ended ? "Settling" : "Held"}</span>`}</div>`;
-    }).join("") : `<div class="empty"><p>No open positions. Polymarket redeems winning positions to your cash automatically.</p></div>`);
-
-    html($("#liveFills"), st.trades.length ? st.trades.slice(0, 30).map(t => {
+    const r = liveRowsHtml(0);
+    html($("#liveOrders"), r.ords.length ? r.ords.join("") : `<div class="empty"><p>No open orders. Bot orders fill immediately or cancel, so they rarely stay open.</p></div>`);
+    html($("#livePositions"), r.pos.length ? r.pos.join("") : `<div class="empty"><p>No open positions. Polymarket redeems winning positions to your cash automatically.</p></div>`);
+    const realized = st.closed.reduce((sum, c) => sum + Number(c.realizedPnl || 0), 0);
+    const rl = $("#lRealized"); set(rl, st.closed.length ? money(realized, true) : "—"); rl.className = signClass(realized);
+    html($("#liveClosed"), st.closed.length ? st.closed.map((c, i) => {
+      const pnl = Number(c.realizedPnl || 0), d = describeToken(c.assetId, idx);
+      return `<div class="hrow tappable" data-live-closed="${i}">${coinBadge(d?.asset || symFromTitle(c.title), "sm")}<div class="h-main"><b>${esc(c.title || d?.label || "Position")}</b><span>${esc(when(toMs(c.timestamp)))}${c.outcome ? `. ${esc(c.outcome)}` : ""}, avg ${cents(Number(c.avgPrice))}</span></div>
+        <span class="tag ${pnl >= 0 ? "won" : "lost"}">${pnl >= 0 ? "Profit" : "Loss"}</span><b class="h-pnl ${signClass(pnl)}">${money(pnl, true)}</b></div>`;
+    }).join("") : `<div class="empty"><p>No closed positions yet.</p></div>`);
+    html($("#liveFills"), st.trades.length ? st.trades.slice(0, 100).map((t, i) => {
       const d = describeToken(t.assetId ?? t.tokenId ?? t.asset_id, idx);
-      const raw = t.matchTime || t.createdAt || t.timestamp;
-      const ms = raw == null ? null : isNaN(raw) ? Date.parse(raw) : Number(raw) * (String(raw).length <= 10 ? 1000 : 1);
-      const whenText = ms ? new Date(ms).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) + ". " : "";
-      return `<div class="hrow">${coinBadge(d?.asset || "?", "sm")}<div class="h-main"><b>${esc(t.side || "")} ${esc(d?.label || t.outcome || "Fill")}</b><span>${esc(whenText)}${Number(t.size || 0).toFixed(2)} at ${cents(Number(t.price))}</span></div>
+      const ms = toMs(t.matchTime || t.createdAt || t.timestamp);
+      return `<div class="hrow tappable" data-live-fill="${i}">${coinBadge(d?.asset || "?", "sm")}<div class="h-main"><b>${esc(t.side || "")} ${esc(d?.label || t.outcome || "Fill")}</b><span>${ms ? esc(when(ms)) + ". " : ""}${Number(t.size || 0).toFixed(2)} at ${cents(Number(t.price))}</span></div>
         <span class="tag">${esc(String(t.status || "filled").replace("TRADE_STATUS_", "").toLowerCase())}</span><b class="h-pnl">${money(Number(t.size || 0) * Number(t.price || 0))}</b></div>`;
     }).join("") : `<div class="empty"><p>No fills yet.</p></div>`);
   }
@@ -895,6 +991,7 @@
     if (prev === "chart" && view !== "chart") C.pause();
     if (view === "chart" && prev !== "chart" && chartMounted) C.resume();
     closeSheet(); window.scrollTo(0, 0);
+    if (isLive() && L.isUnlocked() && (view === "trades" || view === "home")) L.refresh(false);
     draw();
   }
 
@@ -917,10 +1014,15 @@
     }
     if ((el = q("[data-cancel]"))) {
       el.disabled = true;
-      try { await L.cancel(el.dataset.cancel); toast("Order cancelled.", "good"); } catch (err) { toast(err.message, "bad"); el.disabled = false; }
+      try { await L.cancel(el.dataset.cancel); toast("Order cancelled.", "good"); if (el.closest("#sheet")) closeSheet(); } catch (err) { toast(err.message, "bad"); el.disabled = false; }
       return;
     }
     if ((el = q("[data-mode]"))) return setMode(el.dataset.mode);
+    if ((el = q("[data-paper-trade]"))) return paperDetail(el.dataset.paperTrade);
+    if ((el = q("[data-live-pos]"))) return livePositionDetail(el.dataset.livePos);
+    if ((el = q("[data-live-order]"))) return liveOrderDetail(el.dataset.liveOrder);
+    if ((el = q("[data-live-fill]"))) return liveFillDetail(Number(el.dataset.liveFill));
+    if ((el = q("[data-live-closed]"))) return liveClosedDetail(Number(el.dataset.liveClosed));
     if ((el = q("[data-eye]"))) { const inp = el.previousElementSibling; inp.type = inp.type === "password" ? "text" : "password"; el.textContent = inp.type === "password" ? "Show" : "Hide"; return; }
     if ((el = q("[data-use-account]"))) { if (botOn && isLive()) { botOn = false; write(K.bot, false); } revealed = null; await L.setActive(el.dataset.useAccount); toast("Account selected. Unlock it with its passcode.", "info"); return render(); }
     if ((el = q("[data-remove-account]"))) {

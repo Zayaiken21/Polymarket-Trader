@@ -1,16 +1,18 @@
 /* BlueEdge chart: real Binance candles (REST history + WebSocket realtime) drawn with TradingView Lightweight Charts. */
 window.BlueEdgeChart = (() => {
-  const REST = ["https://data-api.binance.vision", "https://api.binance.com", "https://api.binance.us"];
-  const WS = ["wss://data-stream.binance.vision/ws", "wss://stream.binance.com:9443/ws", "wss://stream.binance.us:9443/ws"];
+  // Global Binance only (same prices Binance.com shows). Binance.US is a separate, thinner exchange and is never mixed in.
+  const REST = ["https://data-api.binance.vision", "https://api.binance.com", "https://api-gcp.binance.com", "https://api1.binance.com", "https://api2.binance.com", "https://api3.binance.com", "https://api4.binance.com"];
+  const REST_US = "https://api.binance.us";
+  const WS = ["wss://data-stream.binance.vision/ws", "wss://stream.binance.com:9443/ws", "wss://stream.binance.com:443/ws"];
   const INTERVALS = ["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M"];
   const PAGE = 1000;
-  const HOST_KEY = "blueedge.chartHost";
+  try { localStorage.removeItem("blueedge.chartHost"); } catch {} // old builds remembered Binance.US forever
   const tz = -new Date().getTimezoneOffset() * 60; // show candles in local time
 
-  let restIdx = Number(localStorage.getItem(HOST_KEY)) || 0;
+  let restIdx = 0, source = "Binance", usingUS = false, pollTimer = null, wsFails = 0;
   let chart = null, candles = null, volume = null, host = null, legend = null, statusEl = null;
   let symbol = null, interval = "15m", data = [], loadingOlder = false, reachedStart = false, gen = 0;
-  let ws = null, wsIdx = restIdx, wsTimer = null, lastWsMsg = 0, watchdog = null, priceLine = null;
+  let ws = null, wsIdx = 0, wsTimer = null, lastWsMsg = 0, watchdog = null, priceLine = null;
   const precisionCache = {};
   const listeners = [];
   const onUpdate = fn => listeners.push(fn);
@@ -21,25 +23,27 @@ window.BlueEdgeChart = (() => {
 
   /* ---- REST with host fallback and a small per-minute budget ---- */
   const stamps = [];
+  async function tryHost(base, path) {
+    const res = await fetch(base + path, { cache: "no-store" });
+    if (res.status === 429 || res.status === 418) { const e = new Error("Binance is rate limiting. Waiting a moment."); e.rate = true; throw e; }
+    if (res.status === 400) { const j = await res.json().catch(() => ({})); const e = new Error(j.msg || "Bad request"); e.fatal = true; throw e; }
+    if (!res.ok) throw new Error(`Binance returned ${res.status}`);
+    return res.json();
+  }
   async function rest(path) {
     const now = Date.now();
     while (stamps.length && now - stamps[0] > 60000) stamps.shift();
-    if (stamps.length > 60) throw new Error("Chart is loading too fast. Try again in a moment.");
+    if (stamps.length > 90) throw new Error("Chart is loading too fast. Try again in a moment.");
+    stamps.push(now);
     let lastErr;
     for (let i = 0; i < REST.length; i++) {
       const idx = (restIdx + i) % REST.length;
-      stamps.push(Date.now());
-      try {
-        const res = await fetch(REST[idx] + path, { cache: "no-store" });
-        if (res.status === 429 || res.status === 418) throw new Error("Binance is rate limiting. Waiting before loading more.");
-        if (res.status === 400) { const j = await res.json().catch(() => ({})); const e = new Error(j.msg || "Bad request"); e.fatal = true; throw e; }
-        if (res.status === 451 || res.status === 403) throw new Error("blocked");
-        if (!res.ok) throw new Error(`Binance returned ${res.status}`);
-        if (idx !== restIdx) { restIdx = idx; localStorage.setItem(HOST_KEY, String(idx)); }
-        return res.json();
-      } catch (e) { lastErr = e; if (e.fatal) throw e; }
+      try { const j = await tryHost(REST[idx], path); restIdx = idx; if (usingUS) { usingUS = false; source = "Binance"; } return j; }
+      catch (e) { lastErr = e; if (e.fatal || e.rate) throw e; }
     }
-    throw lastErr || new Error("Couldn't reach Binance");
+    // every global Binance host is unreachable from this network: last resort, clearly labelled
+    try { const j = await tryHost(REST_US, path); usingUS = true; source = "Binance.US (global Binance blocked on this network)"; return j; }
+    catch (e) { throw lastErr || e; }
   }
 
   const toCandle = k => ({ time: Math.floor(k[0] / 1000) + tz, open: +k[1], high: +k[2], low: +k[3], close: +k[4], volume: +k[5] });
@@ -84,11 +88,12 @@ window.BlueEdgeChart = (() => {
     });
   }
 
+  const esc = t => String(t).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   function fmt(v) { const p = precisionCache[symbol]?.precision ?? 2; return v == null ? "—" : Number(v).toLocaleString("en-US", { minimumFractionDigits: p, maximumFractionDigits: p }); }
   function showLegend(c) {
     if (!legend || !c) return;
     const chg = c.open ? ((c.close - c.open) / c.open) * 100 : 0;
-    legend.innerHTML = `<b>${symbol?.replace("USDT", "")}/USDT</b><span>${interval}</span>
+    legend.innerHTML = `<b>${symbol?.replace("USDT", "")}/USDT</b><span>${interval}</span><span class="src ${usingUS ? "warn" : ""}">${esc(source)}${ws && ws.readyState === 1 ? " live" : pollTimer ? " (REST updates)" : ""}</span>
       <span>O <em>${fmt(c.open)}</em></span><span>H <em>${fmt(c.high)}</em></span><span>L <em>${fmt(c.low)}</em></span><span>C <em>${fmt(c.close)}</em></span>
       <span class="${chg >= 0 ? "gain" : "loss"}">${chg >= 0 ? "+" : ""}${chg.toFixed(2)}%</span>`;
   }
@@ -120,7 +125,7 @@ window.BlueEdgeChart = (() => {
       chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, data.length - 120), to: data.length + 5 });
       showLegend(data[data.length - 1]);
       setStatus("");
-      openWs(my);
+      startRealtime(my);
     } catch (e) {
       if (my !== gen) return;
       setStatus(e.fatal ? `Binance doesn't list ${sym.replace("USDT", "")}/USDT.` : `Couldn't load candles: ${e.message}`);
@@ -148,53 +153,65 @@ window.BlueEdgeChart = (() => {
   }
 
   /* ---- realtime ---- */
+  function applyCandle(c) {
+    const last = data[data.length - 1];
+    if (last && c.time < last.time) return;
+    if (last && c.time === last.time) data[data.length - 1] = c; else data.push(c);
+    candles.update(c); volume.update(volBar(c));
+    emit(c);
+  }
+  function startRealtime(my) {
+    stopRealtime();
+    if (usingUS || wsFails >= WS.length * 2) return startPolling(my); // keep the feed consistent with the history source
+    openWs(my);
+  }
   function openWs(my) {
-    closeWs();
     const url = `${WS[wsIdx % WS.length]}/${symbol.toLowerCase()}@kline_${interval}`;
-    let got = false;
-    try { ws = new WebSocket(url); } catch { wsIdx++; wsTimer = setTimeout(() => openWs(my), 2000); return; }
-    const sock = ws;
-    lastWsMsg = Date.now();
+    let got = false, sock;
+    try { sock = new WebSocket(url); } catch { wsFails++; wsIdx++; wsTimer = setTimeout(() => startRealtime(my), 1500); return; }
+    ws = sock; lastWsMsg = Date.now();
+    const probe = setTimeout(() => { if (!got) try { sock.close(); } catch {} }, 8000);
     sock.onmessage = e => {
       if (my !== gen) return;
-      got = true; lastWsMsg = Date.now();
+      if (!got) { got = true; wsFails = 0; clearTimeout(probe); showLegend(data[data.length - 1]); }
+      lastWsMsg = Date.now();
       let m; try { m = JSON.parse(e.data); } catch { return; }
       const k = m.k; if (!k) return;
       const c = { time: Math.floor(k.t / 1000) + tz, open: +k.o, high: +k.h, low: +k.l, close: +k.c, volume: +k.v };
-      const last = data[data.length - 1];
-      if (last && c.time < last.time) return;
-      if (last && c.time === last.time) data[data.length - 1] = c; else data.push(c);
-      candles.update(c); volume.update(volBar(c));
-      showLegend(c);
-      emit(c);
+      applyCandle(c); showLegend(c);
     };
     sock.onclose = () => {
+      clearTimeout(probe);
       if (sock !== ws || my !== gen) return;
-      if (!got) wsIdx++;
-      wsTimer = setTimeout(() => { if (my === gen) resync(my); }, got ? 1500 : 2500);
+      if (!got) { wsFails++; wsIdx++; }
+      wsTimer = setTimeout(() => { if (my === gen) resync(my); }, got ? 1500 : 800);
     };
     sock.onerror = () => {};
     clearInterval(watchdog);
     watchdog = setInterval(() => { if (ws === sock && Date.now() - lastWsMsg > 25000) { try { sock.close(); } catch {} } }, 5000);
   }
-  // after a reconnect, refetch the most recent candles so no gap is left on the chart
+  function startPolling(my) {
+    clearInterval(pollTimer);
+    const tickMs = ["1m", "3m"].includes(interval) ? 3000 : 5000;
+    const poll = async () => {
+      if (my !== gen || document.hidden) return;
+      try { (await rest(`/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=2`)).map(toCandle).forEach(c => { applyCandle(c); showLegend(c); }); } catch {}
+    };
+    pollTimer = setInterval(poll, tickMs); poll();
+    // try the WebSocket again every 2 minutes
+    wsTimer = setTimeout(() => { if (my === gen && !usingUS) { wsFails = 0; startRealtime(my); } }, 120000);
+  }
+  // after a reconnect, refetch the latest candles so no gap is left, then reopen realtime
   async function resync(my) {
-    try {
-      const rows = await rest(`/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=50`);
-      if (my !== gen) return;
-      rows.map(toCandle).forEach(c => {
-        const i = data.findIndex(d => d.time === c.time);
-        if (i >= 0) data[i] = c; else if (!data.length || c.time > data[data.length - 1].time) data.push(c);
-        candles.update(c); volume.update(volBar(c));
-      });
-    } catch {}
-    if (my === gen) openWs(my);
+    try { (await rest(`/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=50`)).map(toCandle).forEach(c => { const i = data.findIndex(d => d.time === c.time); if (i >= 0) { data[i] = c; candles.update(c); volume.update(volBar(c)); } else applyCandle(c); }); } catch {}
+    if (my === gen) startRealtime(my);
   }
-  function closeWs() {
-    clearTimeout(wsTimer); clearInterval(watchdog);
-    const s = ws; ws = null;
-    if (s) { s.onclose = null; try { s.close(); } catch {} }
+  function stopRealtime() {
+    clearTimeout(wsTimer); clearInterval(watchdog); clearInterval(pollTimer); pollTimer = null;
+    const s0 = ws; ws = null;
+    if (s0) { s0.onclose = null; try { s0.close(); } catch {} }
   }
+  const closeWs = stopRealtime;
 
   /* ---- window-open price line for a Polymarket market ---- */
   function clearPriceLine() { if (priceLine && candles) { try { candles.removePriceLine(priceLine); } catch {} } priceLine = null; }

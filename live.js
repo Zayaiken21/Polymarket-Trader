@@ -16,7 +16,7 @@ window.BlueEdgeLive = (() => {
   const state = {
     status: "none", message: "", activeId: null,
     account: null, canTrade: false, mode: null,         // mode: "sdk" (L1+L2) | "l2" (read-only)
-    balance: null, orders: [], positions: [], trades: [],
+    balance: null, orders: [], positions: [], trades: [], closed: [], closedAt: 0,
     lastRefresh: 0, refreshing: false, stream: "off",
     checks: [], checking: false, lastCheck: 0, approvalsMissing: false
   };
@@ -220,7 +220,7 @@ window.BlueEdgeLive = (() => {
     stopStream();
     try { await client?.closeSubscriptions?.(); } catch {}
     client = null; l2 = null; unlockedMeta = null;
-    Object.assign(state, { status: hasVault() ? "locked" : "none", message: "", account: null, canTrade: false, mode: null, balance: null, orders: [], positions: [], trades: [], checks: [], approvalsMissing: false });
+    Object.assign(state, { status: hasVault() ? "locked" : "none", message: "", account: null, canTrade: false, mode: null, balance: null, orders: [], positions: [], trades: [], closed: [], closedAt: 0, checks: [], approvalsMissing: false });
     emit();
   }
 
@@ -291,9 +291,36 @@ window.BlueEdgeLive = (() => {
   const mapOrder = o => ({ id: o.id, assetId: String(o.asset_id ?? o.assetId ?? ""), side: o.side, price: o.price, originalSize: o.original_size ?? o.originalSize, sizeMatched: o.size_matched ?? o.sizeMatched, outcome: o.outcome, orderType: o.order_type ?? o.orderType, status: o.status });
   const mapTrade = t => ({ assetId: String(t.asset_id ?? t.assetId ?? ""), side: t.side, size: t.size, price: t.price, status: t.status, matchTime: t.match_time ?? t.matchTime ?? t.created_at, outcome: t.outcome });
   async function publicPositions(wallet) {
-    const r = await fetch(`${DATA}/positions?user=${wallet}&sizeThreshold=0.01&limit=100`, { cache: "no-store" });
+    const r = await fetch(`${DATA}/positions?user=${wallet}&sizeThreshold=0.01&limit=500`, { cache: "no-store" });
     if (!r.ok) throw new Error(`Positions ${r.status}`);
-    return rows(await r.json()).map(p => ({ assetId: String(p.asset), currentSize: p.size, avgPrice: p.avgPrice, currentPrice: p.curPrice, currentValue: p.currentValue, totalCostUsdc: p.initialValue, title: p.title, outcome: p.outcome }));
+    return rows(await r.json()).map(p => ({ assetId: String(p.asset), conditionId: p.conditionId, currentSize: p.size, avgPrice: p.avgPrice, currentPrice: p.curPrice, currentValue: p.currentValue, totalCostUsdc: p.initialValue, cashPnl: p.cashPnl, title: p.title, outcome: p.outcome, slug: p.slug, eventSlug: p.eventSlug, endDate: p.endDate, redeemable: p.redeemable }));
+  }
+  async function publicClosed(wallet) {
+    const r = await fetch(`${DATA}/closed-positions?user=${wallet}&limit=50&sortBy=TIMESTAMP&sortDirection=DESC`, { cache: "no-store" });
+    if (!r.ok) throw new Error(`Closed positions ${r.status}`);
+    return rows(await r.json()).map(p => ({ assetId: String(p.asset), conditionId: p.conditionId, avgPrice: p.avgPrice, totalBought: p.totalBought, realizedPnl: p.realizedPnl, currentPrice: p.curPrice, title: p.title, outcome: p.outcome, slug: p.slug, eventSlug: p.eventSlug, timestamp: p.timestamp, endDate: p.endDate }));
+  }
+  // walk SDK paginators a few pages deep so the whole account shows, without hammering the API
+  async function allItems(paginator, maxPages = 5) {
+    const out = [];
+    let page = await paginator.firstPage();
+    for (let i = 0; page && i < maxPages; i++) {
+      out.push(...(page.items || []));
+      const next = typeof page.nextPage === "function" ? page.nextPage : typeof page.next === "function" ? page.next : null;
+      if (!next || page.hasNextPage === false || !(page.items || []).length) break;
+      try { page = await next.call(page); } catch { break; }
+    }
+    return out;
+  }
+  async function l2All(path, maxPages = 5) {
+    const out = []; let cursor = "";
+    for (let i = 0; i < maxPages; i++) {
+      const d = await l2Fetch("GET", path, { query: cursor ? `next_cursor=${encodeURIComponent(cursor)}` : "" });
+      out.push(...rows(d));
+      cursor = d?.next_cursor;
+      if (!cursor || cursor === "LTE=") break;
+    }
+    return out;
   }
 
   /* ---------- account data ---------- */
@@ -309,26 +336,29 @@ window.BlueEdgeLive = (() => {
       let results;
       if (client) {
         const { AssetType } = SDK();
+        const wallet = state.account?.wallet;
         results = await Promise.allSettled([
           client.fetchBalanceAllowance({ assetType: AssetType.COLLATERAL }).then(b => Number(b.balance) / 1e6),
-          firstItems(client.listOpenOrders()),
-          firstItems(client.listPositions()),
-          firstItems(client.listAccountTrades())
+          allItems(client.listOpenOrders(), 5),
+          wallet ? publicPositions(wallet).catch(() => allItems(client.listPositions(), 5)) : allItems(client.listPositions(), 5),
+          allItems(client.listAccountTrades(), 3)
         ]);
       } else {
         if (!timeOffset) await syncTime();
         results = await Promise.allSettled([
           l2Fetch("GET", "/balance-allowance", { query: `asset_type=COLLATERAL&signature_type=${l2.walletType}` }).then(b => Number(b.balance) / 1e6),
-          l2Fetch("GET", "/data/orders").then(d => rows(d).map(mapOrder)),
+          l2All("/data/orders", 5).then(r => r.map(mapOrder)),
           publicPositions(l2.wallet),
-          l2Fetch("GET", "/data/trades").then(d => rows(d).map(mapTrade))
+          l2All("/data/trades", 3).then(r => r.map(mapTrade))
         ]);
       }
       const [bal, orders, positions, trades] = results;
       if (bal.status === "fulfilled" && Number.isFinite(bal.value)) state.balance = bal.value;
       if (orders.status === "fulfilled") state.orders = orders.value;
       if (positions.status === "fulfilled") state.positions = positions.value.filter(p => Number(p.currentSize ?? p.size ?? 0) > 0);
-      if (trades.status === "fulfilled") state.trades = trades.value.slice(0, 50);
+      if (trades.status === "fulfilled") state.trades = trades.value.slice(0, 300);
+      const wallet = state.account?.wallet || l2?.wallet;
+      if (wallet && Date.now() - state.closedAt > 60000) { state.closedAt = Date.now(); publicClosed(wallet).then(c => { state.closed = c; emit(); }).catch(() => {}); }
       const failed = results.find(r => r.status === "rejected");
       state.message = failed ? friendly(failed.reason) : (state.canTrade ? "" : state.message);
       state.lastRefresh = Date.now();
