@@ -2,7 +2,7 @@
 window.BlueEdgeStrategy = (() => {
   const KEY = "blueedge.strategy.v3";
   const RULES = Object.freeze({ minPrice: 0.35, maxPrice: 0.75, maxSpread: 0.03, skipFirst: 30, stopBefore: 60, maxOpen: 3, slippage: 0.02 });
-  const defaults = { timeframes: [5, 15, 60], risk: { mode: "pct", pct: 1, usd: 10 } };
+  const defaults = { timeframes: [5, 15, 60], risk: { mode: "pct", pct: 1, usd: 10 }, maxOpen: 3 };
   const clamp = (v, lo, hi, d) => { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
   const round2 = n => Math.round(n * 100) / 100;
 
@@ -10,7 +10,8 @@ window.BlueEdgeStrategy = (() => {
     const o = { ...defaults, ...s };
     o.timeframes = [...new Set((Array.isArray(o.timeframes) ? o.timeframes : defaults.timeframes).map(Number))].filter(t => [5, 15, 60].includes(t)).sort((a, b) => a - b);
     o.risk = { mode: o.risk?.mode === "usd" ? "usd" : "pct", pct: clamp(o.risk?.pct, 0, 100, 1), usd: clamp(o.risk?.usd, 0, 1e9, 10) };
-    return { timeframes: o.timeframes, risk: o.risk };
+    o.maxOpen = Math.round(clamp(o.maxOpen, 1, 20, 3));
+    return { timeframes: o.timeframes, risk: o.risk, maxOpen: o.maxOpen };
   }
   function load() {
     let s = null;
@@ -61,12 +62,12 @@ window.BlueEdgeStrategy = (() => {
     return { ok: !fail, side, price: ask, checks, reason: fail ? fail.why : `Ready: buy ${side} at ${cents(ask)}` };
   }
 
-  const rulesText = () => [
+  const rulesText = (s = defaults) => [
     `Buys Up when the live price is above the price to beat and Down when it is below (Chainlink for 5 and 15 minute markets, Binance for markets that resolve on Binance).`,
     `Only enters ${secs(RULES.skipFirst)} after a window opens and stops with ${secs(RULES.stopBefore)} left.`,
     `Only pays ${cents(RULES.minPrice)}–${cents(RULES.maxPrice)} per share with a spread of ${cents(RULES.maxSpread)} or less.`,
     `Live orders are market orders capped at ${cents(RULES.slippage)} above the current price, so they never fill worse than that.`,
-    `One entry per market and at most ${RULES.maxOpen} open positions. Positions are held until Polymarket settles them.`
+    `One entry per market and at most ${s.maxOpen} open trade${s.maxOpen === 1 ? "" : "s"} at a time (you set this on Home). Positions are held until Polymarket settles them.`
   ];
 
   return { KEY, RULES, defaults, load, save, sanitize, sync, setMoney, stake, fee, evaluate, rulesText, cents, secs, tfName };

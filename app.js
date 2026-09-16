@@ -136,15 +136,29 @@
       <p class="mc-status" data-f="status"></p>`;
     return el;
   }
+  function pulse(node, dir) {
+    if (!node) return;
+    node.classList.remove("flash-up", "flash-down", "flash");
+    void node.offsetWidth;
+    node.classList.add(dir === "up" ? "flash-up" : dir === "down" ? "flash-down" : "flash");
+  }
+  function tickFlash(el, key, value, node) {
+    const prev = el["_" + key];
+    el["_" + key] = value;
+    if (prev == null || value == null || prev === value) return;
+    pulse(node, value > prev ? "up" : "down");
+  }
   function updateCard(el, v) {
     const now = Date.now();
+    tickFlash(el, "ua", v.ctx.up.ask, el.querySelector(".odd.up"));
+    tickFlash(el, "da", v.ctx.down.ask, el.querySelector(".odd.down"));
     const ended = v.m.end <= now;
     set(field(el, "left"), v.live ? clock(v.left) : v.m.start > now ? `in ${clock(v.m.start - now)}` : "ended");
     field(el, "progress").style.transform = `scaleX(${v.progress.toFixed(4)})`;
     set(field(el, "upAsk"), cents(v.ctx.up.ask));
     set(field(el, "downAsk"), cents(v.ctx.down.ask));
     field(el, "split").style.transform = `scaleX(${(v.upProb ?? 0.5).toFixed(4)})`;
-    set(field(el, "spot"), v.ctx.open != null ? `To beat ${fmtPrice(v.ctx.open)}` : "Price to beat loading…");
+    set(field(el, "spot"), v.ctx.open != null ? `To beat ${fmtPrice(v.ctx.open)}` : v.m.start > now ? "To beat: set at open" : "Price to beat loading…");
     const mv = field(el, "move");
     set(mv, v.ctx.spot == null ? "" : `${fmtPrice(v.ctx.spot)}${v.move == null ? "" : ` ${v.move >= 0 ? "▲" : "▼"}${(Math.abs(v.move) * 100).toFixed(3)}%`}`);
     mv.className = v.move == null ? "" : v.move >= 0 ? "gain" : "loss";
@@ -221,7 +235,7 @@
     set(f("upAsk"), cents(v.ctx.up.ask)); set(f("downAsk"), cents(v.ctx.down.ask));
     set(f("upBid"), `sell ${cents(v.ctx.up.bid)}`); set(f("downBid"), `sell ${cents(v.ctx.down.bid)}`);
     $$(".side", el).forEach(b => b.setAttribute("aria-checked", String(b.dataset.side === side)));
-    set(f("open"), v.ctx.open == null ? "Loading…" : `${fmtPrice(v.ctx.open)} ${v.ctx.openSource ? `(${v.ctx.openSource})` : ""}`);
+    set(f("open"), v.ctx.open == null ? (m.start > now ? `Set when it opens in ${clock(m.start - now)}` : "Loading…") : `${fmtPrice(v.ctx.open)} ${v.ctx.openSource ? `(${v.ctx.openSource})` : ""}`);
     set(f("spot"), v.ctx.spot == null ? "—" : `${fmtPrice(v.ctx.spot)} ${v.ctx.spotSource ? `(${v.ctx.spotSource})` : ""}`);
     const mv = f("move"); set(mv, v.move == null ? "—" : `${v.move >= 0 ? "+" : "−"}$${Math.abs(v.ctx.spot - v.ctx.open).toFixed(v.ctx.open >= 100 ? 2 : v.ctx.open >= 1 ? 4 : 5)} ${v.move >= 0 ? "above" : "below"} (${(Math.abs(v.move) * 100).toFixed(3)}%)`);
     set(f("liq"), m.liquidity ? "$" + Math.round(m.liquidity).toLocaleString() : "—");
@@ -390,7 +404,7 @@
       // orders we just placed count too, because Polymarket can take a few seconds to show the new position
       const pending = Object.keys(tried).filter(id => { const mk = D.state.markets.get(id); return mk && mk.end > now; }).length;
       const openCount = Math.max(activePositions.length + L.state.orders.length, pending);
-      if (openCount >= S.RULES.maxOpen) { botNote = `Holding ${openCount} of ${S.RULES.maxOpen} live positions/orders.`; return; }
+      if (openCount >= strategy.maxOpen) { botNote = `Holding ${openCount} of ${strategy.maxOpen} live positions/orders.`; return; }
       const ready = views.filter(v => v.decision.ok && !tried[v.m.id] && !holdingFor(v.m)).sort((a, b) => a.m.end - b.m.end);
       if (!ready.length) { botNote = views.length ? `Watching ${views.length} live markets. None match right now.` : "Waiting for live markets…"; return; }
       if (account.botMode === "ask") return offer(ready);
@@ -402,11 +416,11 @@
     }
 
     const open = openTrades();
-    if (open.length >= S.RULES.maxOpen) { botNote = `Holding ${open.length} of ${S.RULES.maxOpen} paper positions.`; return; }
+    if (open.length >= strategy.maxOpen) { botNote = `Holding ${open.length} of ${strategy.maxOpen} paper positions.`; return; }
     const ready = views.filter(v => v.decision.ok && !trades.some(t => t.marketId === v.m.id)).sort((a, b) => a.m.end - b.m.end);
     if (!ready.length) { botNote = views.length ? `Watching ${views.length} live markets. None match right now.` : "Waiting for live markets…"; return; }
     if (account.botMode === "ask") return offer(ready);
-    let slots = S.RULES.maxOpen - open.length, bought = 0, lastMsg = "";
+    let slots = strategy.maxOpen - open.length, bought = 0, lastMsg = "";
     for (const v of ready) {
       if (slots <= 0) break;
       const r = paperBuy(v.m, v.decision.side, "bot");
@@ -427,7 +441,7 @@
     if (on && isLive()) {
       if (!L.canTrade()) { toast(L.isUnlocked() ? "This account is read-only. Add the signer private key to trade." : "Unlock your live account before starting the bot.", "bad"); location.hash = "#settings"; return; }
       const stake = S.stake(strategy, L.equity());
-      if (!confirm(`Start the LIVE bot?\n\nIt will place real market orders of about ${money(stake)} each on Polymarket, up to ${S.RULES.maxOpen} at a time, while this page is open.`)) return;
+      if (!confirm(`Start the LIVE bot?\n\nIt will place real market orders of about ${money(stake)} each on Polymarket, up to ${strategy.maxOpen} at a time, while this page is open.`)) return;
     }
     botOn = on; write(K.bot, on);
     if (on) { isLeader(); toast(isLive() ? "Live bot is on. Real orders will be placed." : "Paper bot is on.", "info"); }
@@ -491,6 +505,8 @@
     }
     const eq = paperEquity(), closed = trades.filter(t => t.status !== "open"), wins = closed.filter(t => t.pnl > 0).length;
     set($("#equityLabel"), "Paper equity");
+    if ($("#equity")._v != null && Math.abs($("#equity")._v - eq) >= 0.01) pulse($("#equity"), eq > $("#equity")._v ? "up" : "down");
+    $("#equity")._v = eq;
     set($("#equity"), money(eq));
     const total = eq - account.startBalance;
     html($("#equitySub"), `<span class="${signClass(total)}">${money(total, true)}</span> since last reset`);
@@ -521,7 +537,10 @@
     set($("#botNote"), note);
     $(".panel.bot").classList.toggle("on", botOn);
     $$("[data-tf]").forEach(b => b.setAttribute("aria-pressed", String(strategy.timeframes.includes(Number(b.dataset.tf)))));
-    html($("#rulesList"), S.rulesText().map(r => `<li>${esc(r)}</li>`).join(""));
+    const mo = $("#maxOpenInput"); if (mo && document.activeElement !== mo && mo.value !== String(strategy.maxOpen)) mo.value = String(strategy.maxOpen);
+    const openNow = isLive() ? L.state.positions.length + L.state.orders.length : openTrades().length;
+    set($("#maxOpenHint"), `${openNow} open now. The bot stops opening new trades at ${strategy.maxOpen}.`);
+    html($("#rulesList"), S.rulesText(strategy).map(r => `<li>${esc(r)}</li>`).join(""));
   }
 
   function drawMoney() {
@@ -962,6 +981,7 @@
       strategy.timeframes = strategy.timeframes.includes(tf) ? strategy.timeframes.filter(x => x !== tf) : [...strategy.timeframes, tf];
       strategy = S.sanitize(strategy); S.save(strategy); return render();
     }
+    if ((el = q("[data-maxopen-step]"))) { strategy.maxOpen = Math.max(1, Math.min(20, strategy.maxOpen + Number(el.dataset.maxopenStep))); S.save(strategy); pulse($("#maxOpenInput")); return render(); }
     if ((el = q("[data-seg='botMode'] button"))) { reloadBook(); account.botMode = el.dataset.v; saveAccount(); offered.clear(); return render(); }
   });
 
@@ -1048,6 +1068,9 @@
     inp.addEventListener("focus", () => inp.select());
   });
 
+  $("#maxOpenInput").addEventListener("input", e => { const v = parseInt(e.target.value.replace(/\D/g, ""), 10); if (v >= 1) { strategy.maxOpen = Math.min(20, v); S.save(strategy); render(); } });
+  $("#maxOpenInput").addEventListener("blur", e => { e.target.value = String(strategy.maxOpen); });
+  $("#maxOpenInput").addEventListener("focus", e => e.target.select());
   $("#refreshSelect").addEventListener("change", e => { reloadBook(); account.refreshSec = Number(e.target.value); saveAccount(); D.setDiscoveryInterval(account.refreshSec); toast("Market refresh interval updated.", "info"); });
   const balanceInput = () => { const v = parseFloat($("#startInput").value.replace(/[^0-9.]/g, "")); if (!(v >= 10)) { toast("Enter a paper balance of at least $10.", "bad"); return null; } return Math.round(v * 100) / 100; };
   $("#setBalance").addEventListener("click", () => {

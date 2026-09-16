@@ -155,6 +155,10 @@ window.BlueEdgeData = (() => {
     if (upIdx < 0) upIdx = 0;
     const downIdx = upIdx === 0 ? 1 : 0;
     const rate = num(m.feeSchedule?.rate);
+    let meta = ev.eventMetadata || m.eventMetadata || null;
+    if (typeof meta === "string") { try { meta = JSON.parse(meta); } catch { meta = null; } }
+    const metaOpen = num(meta?.priceToBeat ?? meta?.price_to_beat ?? meta?.openPrice ?? meta?.open_price);
+    const metaClose = num(meta?.finalPrice ?? meta?.final_price ?? meta?.closePrice ?? meta?.close_price);
     return {
       id: String(m.conditionId || m.id),
       slug: m.slug || ev.slug,
@@ -169,6 +173,7 @@ window.BlueEdgeData = (() => {
       minShares: num(m.orderMinSize) || 5,
       seriesSlug: ev?.series?.[0]?.slug || ev.seriesSlug || "",
       resolutionSource: String(m.resolutionSource || ev.resolutionSource || "").toLowerCase(),
+      metaOpen: metaOpen > 0 ? metaOpen : null, metaClose: metaClose > 0 ? metaClose : null,
       url: `https://polymarket.com/event/${ev.slug || m.slug}`,
       snap: { bid: num(m.bestBid), ask: num(m.bestAsk), mid: num(parseArr(m.outcomePrices)[upIdx]) }
     };
@@ -219,6 +224,7 @@ window.BlueEdgeData = (() => {
             const n = normalize(ev, m);
             if (!n || n.end < now - 60000) continue;
             found.set(n.id, n);
+            applyMeta(n);
             if (n.seriesSlug) learnedSeries.add(n.seriesSlug);
           }
         }
@@ -278,6 +284,7 @@ window.BlueEdgeData = (() => {
       syncPoly();
       if (!rtds.ws || rtds.ws.readyState > 1) { if (!rtds.timer) connectRtds(); }
       refreshStaleBooks();
+      refreshPriceToBeat();
       if (now % 5000 < 1000) resolverTick();
       // make sure we hold a fresh window-open price for live markets that weren't open when the app loaded
       for (const m of state.markets.values()) if (m.start <= now && m.end > now && !usesBinance(m) && chainlinkAt(m.asset, m.start) == null && !official[m.id]?.open && officialFails < 3 && now - (official[m.id]?.at || 0) > 60000) { fetchOfficial(m); break; }
@@ -546,8 +553,40 @@ window.BlueEdgeData = (() => {
     return o;
   }
 
+  function applyMeta(n) {
+    if (!n.metaOpen && !n.metaClose) return;
+    const o = official[n.id] || (official[n.id] = {});
+    if (n.metaOpen) { o.open = n.metaOpen; o.src = "Polymarket"; }
+    if (n.metaClose) { o.close = n.metaClose; if (o.open) o.done = true; }
+    emitSoon("spot", 300);
+  }
+  // One batched Gamma request (every 12s at most) for live windows still missing Polymarket's price to beat
+  let ptbAt = 0;
+  async function refreshPriceToBeat() {
+    const now = Date.now();
+    if (now - ptbAt < 12000) return;
+    const need = [...state.markets.values()].filter(m => m.start <= now - 3000 && m.end > now - 120000 && !(official[m.id]?.open && (m.end > now || official[m.id]?.close)));
+    if (!need.length) return;
+    ptbAt = now;
+    const slugs = need.sort((a, b) => b.start - a.start).slice(0, 20).map(m => m.slug);
+    try {
+      const events = await gamma(`/events?${slugs.map(x => "slug=" + encodeURIComponent(x)).join("&")}&limit=${slugs.length}`);
+      const seen = new Set();
+      for (const ev of Array.isArray(events) ? events : []) for (const mk of ev.markets || []) {
+        const n = normalize(ev, mk); if (!n) continue;
+        seen.add(n.slug); applyMeta(n);
+        const cur = state.markets.get(n.id); if (cur) Object.assign(cur, { metaOpen: n.metaOpen ?? cur.metaOpen, metaClose: n.metaClose ?? cur.metaClose });
+      }
+      // if multi-slug isn't honoured, look up the two newest individually
+      if (!seen.size) for (const x of slugs.slice(0, 2)) {
+        const evs = await gamma(`/events?slug=${encodeURIComponent(x)}`);
+        for (const ev of Array.isArray(evs) ? evs : []) for (const mk of ev.markets || []) { const n = normalize(ev, mk); if (n) applyMeta(n); }
+      }
+    } catch {}
+  }
   const usesBinance = m => /binance/.test(m.resolutionSource || "");
   function priceToBeat(m) {
+    if (m.start > Date.now()) return { price: null, source: "", pending: true };
     const o = official[m.id];
     if (o?.open > 0) return { price: o.open, source: "Polymarket" };
     const bin = state.opens[`${m.asset}:${m.tf}:${m.start}`];
