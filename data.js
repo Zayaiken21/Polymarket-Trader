@@ -734,7 +734,9 @@ window.BlueEdgeData = (() => {
   }
   function livePrice(m) {
     const c = state.chainlink[m.asset], s = state.spot[m.asset];
-    if (!usesBinance(m) && c && Date.now() - c.ts < 60000) return { price: c.price, source: "Chainlink", ts: c.ts };
+    // Chainlink (via Polymarket's own RTDS feed) is real-time-oracle data for every timeframe, not just 5m/15m —
+    // show it whenever it's fresh, and only fall back to Binance's ticker when Chainlink is stale or missing.
+    if (c && Date.now() - c.ts < 60000) return { price: c.price, source: "Chainlink", ts: c.ts };
     return s ? { price: s.price, source: "Binance", ts: s.ts } : null;
   }
 
@@ -785,7 +787,7 @@ window.BlueEdgeData = (() => {
     if (o?.done && o.open > 0 && o.close > 0) return setRes(m, o.close >= o.open ? "Up" : "Down", "Polymarket prices", true);
     if (now > m.end + estimateAfterMs) {
       const ptb = priceToBeat(m);
-      if (ptb?.exact && ptb.source === "Chainlink") { const c = twapBefore(m.asset, m.end, LOOKBACK_MS[m.tf] || 30000); if (c != null) return setRes(m, c >= ptb.price ? "Up" : "Down", "Chainlink TWAP estimate", false); }
+      if (ptb?.exact && ptb.source === "Chainlink at open") { const c = twapBefore(m.asset, m.end, LOOKBACK_MS[m.tf] || 30000); if (c != null) return setRes(m, c >= ptb.price ? "Up" : "Down", "Chainlink TWAP estimate", false); }
       if (ptb?.exact && usesBinance(m)) { const c = await binanceClose(m); if (c != null) return setRes(m, c >= ptb.price ? "Up" : "Down", "Binance 1h candle", false); }
       if (!ptb?.exact) { const c = await binanceClose(m), b = state.opens[`${m.asset}:${m.tf}:${m.start}`]; if (b != null && c != null) return setRes(m, c >= b ? "Up" : "Down", "Binance candle", false); }
     }
