@@ -400,15 +400,17 @@ window.BlueEdgeLive = (() => {
     const add = (name, ok, detail) => { state.checks.push({ name, ok, detail }); emit(); };
     const meta = unlockedMeta || active();
     add("Saved on this device", true, `${meta.label}, encrypted with your passcode`);
-    add("Signer key (L1)", client ? true : meta.hasKey ? false : null, client ? `Signed in as ${short(state.account.signer)}. Orders can be signed.` : meta.hasKey ? "Private key saved but Polymarket sign-in failed." : "No private key. This account is read-only and can't place orders.");
+    // Signing in (L1) already succeeded by the time `client` exists, so it's not a separate pass/fail gate —
+    // only show it as its own line when there's no client, to explain why the account is read-only.
+    if (!client) add("Signer key", meta.hasKey ? false : null, meta.hasKey ? "Private key saved but Polymarket sign-in failed." : "No private key. This account is read-only and can't place orders.");
     try {
       let bal;
       if (client) { const { AssetType } = SDK(); bal = Number((await client.fetchBalanceAllowance({ assetType: AssetType.COLLATERAL })).balance) / 1e6; }
       else bal = Number((await l2Fetch("GET", "/balance-allowance", { query: `asset_type=COLLATERAL&signature_type=${l2.walletType}` })).balance) / 1e6;
       state.balance = bal;
-      add("API credentials (L2)", true, "Polymarket accepted the signed balance request.");
+      add("Polymarket connection", true, client ? `Signed in as ${short(state.account.signer)}. Orders can be signed.` : "Polymarket accepted the signed balance request.");
       add("Cash balance", bal > 0, `$${bal.toFixed(2)} pUSD available${bal > 0 ? "" : ". Deposit on polymarket.com to trade."}`);
-    } catch (e) { add("API credentials (L2)", false, friendly(e)); }
+    } catch (e) { add("Polymarket connection", false, friendly(e)); }
     if (client) {
       try { const closedOnly = await client.fetchClosedOnlyMode?.(); if (closedOnly != null) add("Account can open positions", !closedOnly, closedOnly ? "Polymarket has this account in close-only mode." : "Not in close-only mode."); } catch {}
       try {
