@@ -43,7 +43,7 @@ window.BlueEdgeStrategy = (() => {
     if (!s.timeframes.includes(m.tf)) return done(`${tfName(m.tf)} markets are off`);
     if (left <= 0) return done("Window closed");
     if (elapsed < 0) return done(`Opens in ${secs(-elapsed)}`);
-    if (ctx.open == null) return done(ctx.openNote || "Waiting for the price to beat");
+    if (ctx.open == null || ctx.openExact === false) return done(ctx.openNote || "Waiting for the price to beat");
     if (ctx.spot == null) return done("Waiting for the live price");
     if (ctx.spot === ctx.open) return done("Price is exactly at the price to beat");
     const side = ctx.spot > ctx.open ? "Up" : "Down";

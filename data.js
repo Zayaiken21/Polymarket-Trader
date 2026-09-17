@@ -518,12 +518,9 @@ window.BlueEdgeData = (() => {
     rtds.ws = ws; rtds.last = Date.now(); rtds.got = false; state.status.chainlink = "connecting";
     ws.onopen = () => {
       rtds.retry = 0;
-      ws.send(JSON.stringify({ action: "subscribe", subscriptions: [{ topic: "crypto_prices_chainlink", type: "*", filters: "" }] }));
-      setTimeout(() => {
-        if (rtds.ws !== ws || ws.readyState !== 1 || rtds.got) return;
-        const assets = new Set(["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE", ...[...state.markets.values()].map(m => m.asset)]);
-        ws.send(JSON.stringify({ action: "subscribe", subscriptions: [...assets].map(a => ({ topic: "crypto_prices_chainlink", type: "update", filters: JSON.stringify({ symbol: a.toLowerCase() + "/usd" }) })) }));
-      }, 6000);
+      const sub = JSON.stringify({ action: "subscribe", subscriptions: [{ topic: "crypto_prices_chainlink", type: "update" }] });
+      ws.send(sub);
+      setTimeout(() => { if (rtds.ws === ws && ws.readyState === 1 && !rtds.got) ws.send(sub); }, 8000); // resend once if silent
       clearInterval(rtds.ping);
       rtds.ping = setInterval(() => {
         if (ws.readyState !== 1) return;
@@ -561,23 +558,66 @@ window.BlueEdgeData = (() => {
   }
 
   /* ---------- official window prices from polymarket.com (best effort; disabled if the browser blocks it) ---------- */
-  const official = {}; let officialFails = 0, officialPauseUntil = 0;
+  const official = {};
+  const PTB_API = "https://polymarket.com/api/crypto/crypto-price";
   const VARIANT = { 5: "fiveminute", 15: "fifteen", 60: "hourly" };
-  async function fetchOfficial(m) {
-    if (Date.now() < officialPauseUntil) return official[m.id] || null;
+  const isoSec = ms => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z"); // API expects 2026-09-17T01:15:00Z
+  const RELAY_KEY = "blueedge.ptbRelay";
+  const routeDown = {}; let ptbLastCall = 0;
+  state.status.ptbApi = "checking"; // checking | direct | relay | blocked
+  state.ptbCheck = { checked: 0, matched: 0, worstDiff: 0, seen: {} };
+  function ptbRoutes() {
+    const relay = String(localStorage.getItem(RELAY_KEY) || "").trim().replace(/\/+$/, "");
+    const routes = [{ name: "direct", url: q => `${PTB_API}?${q}` }];
+    if (/^https:\/\//.test(relay)) routes.push({ name: "relay", url: q => `${relay}?${q}` });
+    return routes.sort((a, b) => (a.name === state.status.ptbApi ? -1 : b.name === state.status.ptbApi ? 1 : 0));
+  }
+  function recordCheck(m, o) {
+    const cap = captured[`${m.asset}:${m.start}`];
+    if (!(o.open > 0) || cap == null || state.ptbCheck.seen[m.id] || usesBinance(m)) return;
+    const diff = Math.abs(o.open - cap);
+    state.ptbCheck.seen[m.id] = true;
+    state.ptbCheck.checked++;
+    if (diff <= Math.max(0.005, o.open * 1e-6)) state.ptbCheck.matched++;
+    state.ptbCheck.worstDiff = Math.max(state.ptbCheck.worstDiff, diff);
+  }
+  async function fetchOfficial(m, { force = false } = {}) {
     const o = official[m.id] || (official[m.id] = {});
-    if (o.done || Date.now() - (o.at || 0) < 20000) return o;
-    o.at = Date.now();
-    try {
-      const q = new URLSearchParams({ symbol: m.asset, eventStartTime: new Date(m.start).toISOString(), variant: VARIANT[m.tf], endDate: new Date(m.end).toISOString() });
-      const r = await fetch(`https://polymarket.com/api/crypto/crypto-price?${q}`, { cache: "no-store" });
-      if (!r.ok) throw new Error(r.status);
-      const j = await r.json(); officialFails = 0;
-      if (Number(j.openPrice) > 0) o.open = Number(j.openPrice);
-      if (j.closePrice != null && Number(j.closePrice) > 0) o.close = Number(j.closePrice);
-      if (j.completed && o.close) o.done = true;
-    } catch { if (++officialFails >= 3) { officialFails = 0; officialPauseUntil = Date.now() + 10 * 60000; } }
+    if (o.done) return o;
+    const now = Date.now();
+    if (o.open && m.end > now && !force) return o;             // price to beat never changes once a window opens
+    if (!force && now - (o.at || 0) < (o.open ? 30000 : 8000)) return o;
+    if (now - ptbLastCall < 700) return o;                    // ≤ ~1.4 requests/second overall
+    const routes = ptbRoutes().filter(r => now >= (routeDown[r.name] || 0));
+    if (!routes.length) { state.status.ptbApi = "blocked"; return o; }
+    o.at = now; ptbLastCall = now;
+    const q = new URLSearchParams({ symbol: m.asset, eventStartTime: isoSec(m.start), variant: VARIANT[m.tf], endDate: isoSec(m.end) }).toString();
+    for (const r of routes) {
+      try {
+        const res = await fetch(r.url(q), { cache: "no-store" });
+        if (res.status === 429) { routeDown[r.name] = Date.now() + 60000; continue; }
+        if (!res.ok) throw new Error(res.status);
+        const j = await res.json();
+        const open = Number(j.openPrice), close = j.closePrice != null ? Number(j.closePrice) : null;
+        if (open > 0) o.open = open;
+        if (close > 0) o.close = close;
+        if (j.completed && o.open && o.close) o.done = true;
+        if (state.status.ptbApi !== r.name) { state.status.ptbApi = r.name; emit("status"); }
+        recordCheck(m, o);
+        emitSoon("spot", 150);
+        return o;
+      } catch {
+        routeDown[r.name] = Date.now() + 5 * 60000; // CORS-blocked or offline: try again in 5 minutes
+      }
+    }
+    if (state.status.ptbApi !== "blocked") { state.status.ptbApi = "blocked"; emit("status"); }
     return o;
+  }
+  function setPtbRelay(url) {
+    localStorage.setItem(RELAY_KEY, String(url || "").trim());
+    delete routeDown.relay; delete routeDown.direct; state.status.ptbApi = "checking";
+    for (const m of state.markets.values()) if (official[m.id] && !official[m.id].open) official[m.id].at = 0;
+    emit("status");
   }
 
   function applyMeta(n) {
@@ -636,17 +676,19 @@ window.BlueEdgeData = (() => {
     if (m.start > now) return { price: null, source: "", pending: true, note: "Set when the window opens" };
     const o = official[m.id];
     if (o?.open > 0) return { price: o.open, source: "Polymarket", exact: true };
+    fetchOfficial(m);
+    const key = `${m.asset}:${m.tf}:${m.start}`;
     if (usesBinance(m)) {
-      const key = `${m.asset}:${m.tf}:${m.start}`;
       if (binOpen[key] != null) return { price: binOpen[key], source: "Binance 1h open", exact: true };
       fetchBinanceOpen(m);
-      return { price: null, source: "", note: "Loading the Binance candle open…" };
+      return { price: null, source: "", note: "Loading Polymarket's price to beat…" };
     }
     const cap = captured[`${m.asset}:${m.start}`];
     if (cap != null) return { price: cap, source: "Chainlink", exact: true };
-    if (now - m.start < 20000 && state.status.chainlink === "live") return { price: null, source: "", note: "Capturing the Chainlink open…" };
-    if (o === undefined || now - (o.at || 0) > 60000) fetchOfficial(m); // polymarket.com fallback, if the browser allows it
-    return { price: null, source: "", missing: true, note: "Not captured: BlueEdge wasn't connected when this window opened. The next window will have it." };
+    const est = binOpen[key] ?? state.opens[key] ?? null;
+    if (est == null) fetchBinanceOpen(m);
+    return { price: est, source: est != null ? "Binance estimate" : "", estimate: true,
+      note: now - m.start < 20000 ? "Loading Polymarket's price to beat…" : "Estimate only. The bot waits for Polymarket's exact price to beat." };
   }
   function livePrice(m) {
     const c = state.chainlink[m.asset], s = state.spot[m.asset];
@@ -697,7 +739,7 @@ window.BlueEdgeData = (() => {
         if (w) return setRes(m, /^(up|yes)$/i.test(w) ? "Up" : "Down", "Polymarket", true);
       } catch {}
     }
-    const o = await fetchOfficial(m);
+    const o = await fetchOfficial(m, { force: true });
     if (o?.done && o.open > 0 && o.close > 0) return setRes(m, o.close >= o.open ? "Up" : "Down", "Polymarket prices", true);
     if (now > m.end + estimateAfterMs) {
       const ptb = priceToBeat(m);
@@ -773,7 +815,8 @@ window.BlueEdgeData = (() => {
   }
 
   return {
-    state, on, discover, startLoop, setDiscoveryInterval: setInterval_, fetchResolutions, priceToBeat, livePrice, resolve,
+    state, on, discover, startLoop, setDiscoveryInterval: setInterval_, fetchResolutions, priceToBeat, livePrice, resolve, setPtbRelay,
+    getPtbRelay: () => localStorage.getItem("blueedge.ptbRelay") || "",
     resolutionFor: id => state.resolutions[id] || null,
     bookFor, openFor, spotFor, markets, watch, TIMEFRAMES
   };

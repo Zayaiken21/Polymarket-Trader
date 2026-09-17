@@ -3,21 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'; connect-src 'self' https://polymarket.com https://*.polymarket.com wss://*.polymarket.com https://gamma-api.polymarket.com https://clob.polymarket.com https://data-api.polymarket.com https://relayer-v2.polymarket.com https://polygon.drpc.org wss://ws-subscriptions-clob.polymarket.com wss://ws-live-data.polymarket.com https://data-api.binance.vision wss://data-stream.binance.vision https://api.binance.com https://api-gcp.binance.com https://api1.binance.com https://api2.binance.com https://api3.binance.com https://api4.binance.com wss://stream.binance.com:9443 wss://stream.binance.com https://api.binance.us wss://stream.binance.us:9443">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'; connect-src 'self' https://*.workers.dev https://polymarket.com https://*.polymarket.com wss://*.polymarket.com https://gamma-api.polymarket.com https://clob.polymarket.com https://data-api.polymarket.com https://relayer-v2.polymarket.com https://polygon.drpc.org wss://ws-subscriptions-clob.polymarket.com wss://ws-live-data.polymarket.com https://data-api.binance.vision wss://data-stream.binance.vision https://api.binance.com https://api-gcp.binance.com https://api1.binance.com https://api2.binance.com https://api3.binance.com https://api4.binance.com wss://stream.binance.com:9443 wss://stream.binance.com https://api.binance.us wss://stream.binance.us:9443">
   <meta name="referrer" content="no-referrer">
-  <meta name="blueedge-version" content="3.4.1">
+  <meta name="blueedge-version" content="3.4.2">
   <meta name="theme-color" content="#030B1A">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>BlueEdge · Polymarket crypto trader</title>
-  <link rel="stylesheet" href="styles.css?v=3.4.1">
+  <link rel="stylesheet" href="styles.css?v=3.4.2">
 </head>
 <body>
   <div class="shell">
     <aside class="rail">
       <a class="brand" href="#home" aria-label="BlueEdge home">
         <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 18 11 6l3 5 2-3 4 10z"/></svg></span>
-        <span class="brand-text"><b>BlueEdge</b><small>Polymarket crypto trader · v3.4.1</small></span>
+        <span class="brand-text"><b>BlueEdge</b><small>Polymarket crypto trader · v3.4.2</small></span>
       </a>
       <nav class="nav" aria-label="Main">
         <a href="#home"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11.5 12 4l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg><span>Home</span></a>
@@ -205,9 +205,11 @@
           <article class="panel">
             <h3>Connections</h3>
             <ul class="conn-list" id="connList"></ul>
+            <label class="field"><span>Price-to-beat relay <em class="opt">optional</em></span><input type="text" id="ptbRelayInput" placeholder="https://blueedge-ptb.yourname.workers.dev" autocapitalize="off" autocorrect="off" spellcheck="false"><small>Only needed if "Polymarket price to beat" shows blocked. Deploy the included ptb-worker.js on Cloudflare (free) and paste its address.</small></label>
+            <button class="btn ghost" id="ptbRelaySave">Save relay</button>
             <button class="btn ghost" data-action="refresh">Refresh markets now</button>
             <button class="btn danger" id="resetAll">Erase all BlueEdge data on this device</button>
-            <p class="hint center">BlueEdge version 3.4.1</p>
+            <p class="hint center">BlueEdge version 3.4.2</p>
           </article>
         </div>
       </section>
@@ -219,12 +221,12 @@
   <div class="toasts" id="toasts" aria-live="polite"></div>
   <input type="file" id="accountFile" accept="application/json,.json" hidden>
 
-  <script src="lightweight-charts.js?v=3.4.1"></script>
-  <script src="polymarket-sdk.js?v=3.4.1"></script>
-  <script src="data.js?v=3.4.1"></script>
-  <script src="strategy.js?v=3.4.1"></script>
-  <script src="chart.js?v=3.4.1"></script>
-  <script src="live.js?v=3.4.1"></script>
-  <script src="app.js?v=3.4.1"></script>
+  <script src="lightweight-charts.js?v=3.4.2"></script>
+  <script src="polymarket-sdk.js?v=3.4.2"></script>
+  <script src="data.js?v=3.4.2"></script>
+  <script src="strategy.js?v=3.4.2"></script>
+  <script src="chart.js?v=3.4.2"></script>
+  <script src="live.js?v=3.4.2"></script>
+  <script src="app.js?v=3.4.2"></script>
 </body>
 </html>
