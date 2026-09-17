@@ -48,7 +48,8 @@
   const tfShort = tf => (tf === 60 ? "1h" : `${tf}m`);
   const coinName = a => NAMES[a] || a;
   const coinColor = a => COLORS[a] || "#4DA3FF";
-  const fmtPrice = p => p == null ? "—" : p >= 1000 ? "$" + p.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : p >= 1 ? "$" + p.toFixed(p >= 100 ? 2 : 4) : "$" + p.toFixed(5);
+  // same precision Polymarket shows: 2 decimals from $100, 4 from $1, 6 below $1 (e.g. DOGE $0.080589)
+  const fmtPrice = p => p == null ? "—" : p >= 1000 ? "$" + p.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : p >= 1 ? "$" + p.toFixed(p >= 100 ? 2 : 4) : "$" + p.toFixed(6);
   const set = (el, text) => { if (el && el.textContent !== text) el.textContent = text; };
   const html = (el, h) => { if (el && el._html !== h) { el.innerHTML = h; el._html = h; } };
   const signClass = n => (n > 0.004 ? "gain" : n < -0.004 ? "loss" : "");
@@ -706,7 +707,8 @@
     html($("#chartCoins"), coins.map(c => `<button data-coin="${esc(c)}">${esc(c)}</button>`).join(""));
     $$("#chartCoins button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.coin === ui.chartCoin)));
     $$("#chartIntervals button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.interval === ui.chartInterval)));
-    if (C.symbol !== ui.chartCoin + "USDT" || C.interval !== ui.chartInterval) C.load(ui.chartCoin, ui.chartInterval).then(applyChartLine);
+    if (C.symbol !== ui.chartCoin + "USDT" || C.interval !== ui.chartInterval) { chartLineKey = ""; C.load(ui.chartCoin, ui.chartInterval).then(() => { chartLineKey = ""; applyChartLine(); }); }
+    else applyChartLine();
     set($("#chartMarketsTitle"), `${coinName(ui.chartCoin)} markets on Polymarket`);
     const now = Date.now();
     const list = liveMarkets(now).filter(m => m.asset === ui.chartCoin).sort((a, b) => a.tf - b.tf).map(m => vm(m, now));
@@ -720,16 +722,21 @@
     return el;
   }
   function updateChartRow(el, v) {
-    set(field(el, "sub"), v.ctx.open != null ? `Open ${fmtPrice(v.ctx.open)}${v.move != null ? `, ${v.move >= 0 ? "+" : "−"}${(Math.abs(v.move) * 100).toFixed(3)}%` : ""}` : "Waiting for window open");
+    set(field(el, "sub"), v.ctx.open != null ? `To beat ${fmtPrice(v.ctx.open)}${v.move != null ? `, ${v.move >= 0 ? "+" : "−"}${(Math.abs(v.move) * 100).toFixed(3)}%` : ""}` : "To beat —");
     set(field(el, "odds"), `Up ${cents(v.ctx.up.ask)} / Down ${cents(v.ctx.down.ask)}`);
     set(field(el, "left"), `${clock(v.left)} left`);
-    el.classList.toggle("selected", ui.chartMarket === v.m.id);
+    el.classList.toggle("selected", (Number(ui.chartPtbTf) || 5) === v.m.tf);
   }
+  let chartLineKey = "";
   function applyChartLine() {
-    const m = ui.chartMarket && D.state.markets.get(ui.chartMarket);
-    if (!m || m.asset !== ui.chartCoin || m.end < Date.now()) { C.clearPriceLine(); return; }
-    const open = D.openFor(m);
-    if (open != null) C.setPriceLine(open, `${tfShort(m.tf)} open`);
+    const tf = Number(ui.chartPtbTf) || 5, now = Date.now();
+    const m = D.markets().find(x => x.asset === ui.chartCoin && x.tf === tf && x.start <= now && x.end > now);
+    const ptb = m ? D.priceToBeat(m) : null;
+    const key = m && ptb?.exact ? `${m.id}:${ptb.price}` : "";
+    if (key === chartLineKey) return;
+    chartLineKey = key;
+    if (!key) { C.clearPriceLine(); return; }
+    C.setPriceLine(ptb.price, `${tfShort(tf)} to beat`);
   }
 
   /* positions */
@@ -961,6 +968,7 @@
       [s.gamma, "Polymarket markets", s.lastDiscovery ? `${s.gammaMsg}. Checked ${Math.round((now - s.lastDiscovery) / 1000)}s ago, ${perMin} request${perMin === 1 ? "" : "s"} in the last minute.` : s.gammaMsg || "Starting up"],
       [s.poly, "Polymarket order books", `${s.polyTokens} outcome prices streaming, with a REST refresh for any that go quiet.`],
       [s.chainlink, "Chainlink prices (price to beat)", "Polymarket's live oracle feed that 5 and 15 minute markets resolve on."],
+      [D.state.ptbCheck?.checked ? (D.state.ptbCheck.matched === D.state.ptbCheck.checked ? "live" : "error") : "connecting", "Price to beat check", D.state.ptbCheck?.checked ? `${D.state.ptbCheck.matched} of ${D.state.ptbCheck.checked} captured prices matched Polymarket's official price to beat.` : "Compares each captured price with Polymarket's official value once Polymarket publishes it."],
       [s.binance, "Binance feed", s.binanceHost ? `Using ${s.binanceHost}. Falls back to other Binance hosts automatically.` : "Starts once markets are found."],
       [L.isUnlocked() ? (L.canTrade() && L.state.stream !== "live" ? "connecting" : "live") : L.hasVault() ? "idle" : "offline", "Live account", L.isUnlocked() ? (L.canTrade() ? "L1 + L2 connected. Updates stream from Polymarket, with a backup refresh every 20 seconds." : "L2 read-only. Balance and orders refresh every 15 seconds.") : L.hasVault() ? "Saved and locked." : "Not connected."]
     ];
@@ -1035,10 +1043,10 @@
       if (!L.hasVault() && isLive()) { mode = "paper"; write(K.mode, mode); }
       toast(`Removed ${acc.label}.`, "info"); return render();
     }
-    if ((el = q("[data-coin]"))) { ui.chartCoin = el.dataset.coin; ui.chartMarket = null; saveUi(); return draw(); }
+    if ((el = q("[data-coin]"))) { ui.chartCoin = el.dataset.coin; chartLineKey = ""; saveUi(); return draw(); }
     if ((el = q("[data-interval]"))) { ui.chartInterval = el.dataset.interval; saveUi(); return draw(); }
     if ((el = q("[data-open-sheet]"))) return openSheet(el.dataset.openSheet);
-    if ((el = q("[data-chart-market]"))) { ui.chartMarket = ui.chartMarket === el.dataset.chartMarket ? null : el.dataset.chartMarket; saveUi(); applyChartLine(); return draw(); }
+    if ((el = q("[data-chart-market]"))) { const mk = D.state.markets.get(el.dataset.chartMarket); if (mk) { ui.chartPtbTf = mk.tf; saveUi(); chartLineKey = ""; applyChartLine(); } return draw(); }
 
     const action = q("[data-action]")?.dataset.action;
     switch (action) {
@@ -1059,7 +1067,7 @@
       case "sheet-chart": {
         if (!sheet) return;
         const m = D.state.markets.get(sheet.id);
-        ui.chartCoin = m.asset; ui.chartMarket = m.id;
+        ui.chartCoin = m.asset; ui.chartPtbTf = m.tf; chartLineKey = "";
         ui.chartInterval = { 5: "1m", 15: "1m", 60: "5m" }[m.tf] || ui.chartInterval;
         saveUi(); closeSheet(); location.hash = "#chart"; return;
       }
@@ -1231,7 +1239,7 @@
   ["gesturestart", "gesturechange"].forEach(ev => document.addEventListener(ev, e => { if (!e.target.closest?.(".chart-host")) e.preventDefault(); }, { passive: false }));
   document.addEventListener("touchmove", e => { if (e.touches.length > 1 && !e.target.closest?.(".chart-host")) e.preventDefault(); }, { passive: false });
   L.on(render);
-  C.onUpdate(() => { if (ui.chartMarket) applyChartLine(); });
+  C.onUpdate(() => applyChartLine());
 
   /* ---------- start ---------- */
   if (mode === "live" && !L.hasVault()) { mode = "paper"; write(K.mode, mode); }

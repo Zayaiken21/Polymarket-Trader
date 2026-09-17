@@ -488,19 +488,35 @@ window.BlueEdgeData = (() => {
   const captured = (() => { try { const c = JSON.parse(localStorage.getItem(CAP_KEY) || "{}"); const cut = Date.now() - 3 * 3600e3; for (const k in c) if (Number(k.split(":")[1]) < cut) delete c[k]; return c; } catch { return {}; } })();
   let capSave = null;
   const saveCaptured = () => { clearTimeout(capSave); capSave = setTimeout(() => { try { localStorage.setItem(CAP_KEY, JSON.stringify(captured)); } catch {} }, 500); };
+  let feedEpoch = 0;                         // bumps on every (re)connect: a capture may never span a reconnect
+  const pendingCap = {};                     // "BTC:boundary" -> { prevT, epoch }
+  function finalizeCapture(asset, boundary) {
+    const key = `${asset}:${boundary}`, pend = pendingCap[key];
+    delete pendingCap[key];
+    if (!pend || captured[key] != null || pend.epoch !== feedEpoch) return;
+    const arr = ticks[asset] || [];
+    let first = null;
+    for (const k of arr) if (k.t >= boundary && (!first || k.t < first.t)) first = k;   // earliest timestamp, even if it arrived out of order
+    if (!first || first.t - boundary > 60000) return;
+    captured[key] = first.p; saveCaptured(); emitSoon("spot", 50);
+  }
   function addTick(asset, t, p) {
     const prev = lastTick[asset];
     const arr = ticks[asset] || (ticks[asset] = []);
-    if (prev && t <= prev.t) { if (t < prev.t) { arr.push({ t, p }); arr.sort((a, b) => a.t - b.t); } return; }
-    if (prev) {
-      const boundary = Math.floor(t / 300000) * 300000;
-      // exact: we saw a tick just before the boundary, so this one is the first at/after it
-      if (prev.t < boundary && boundary - prev.t <= 15000 && t - boundary <= 5000 && captured[`${asset}:${boundary}`] == null) { captured[`${asset}:${boundary}`] = p; saveCaptured(); emitSoon("spot", 100); }
-    }
-    lastTick[asset] = { t, p };
     arr.push({ t, p });
+    if (arr.length > 1 && arr[arr.length - 2].t > t) arr.sort((a, b) => a.t - b.t);
     const cutoff = Date.now() - 75 * 60000;
     while (arr.length && arr[0].t < cutoff) arr.shift();
+    if (prev && t <= prev.t) return;
+    if (prev && prev.epoch === feedEpoch) {
+      const boundary = Math.floor(t / 300000) * 300000;
+      // we were connected before the open (last tick ≤ 60s earlier) and this is the first tick after it
+      if (prev.t < boundary && boundary - prev.t <= 60000 && captured[`${asset}:${boundary}`] == null && !pendingCap[`${asset}:${boundary}`]) {
+        pendingCap[`${asset}:${boundary}`] = { prevT: prev.t, epoch: feedEpoch };
+        setTimeout(() => finalizeCapture(asset, boundary), 1500);                    // let any out-of-order ticks land first
+      }
+    }
+    lastTick[asset] = { t, p, epoch: feedEpoch };
     state.chainlink[asset] = { price: p, ts: t };
   }
   function connectRtds() {
@@ -508,6 +524,7 @@ window.BlueEdgeData = (() => {
     if (rtds.ws && rtds.ws.readyState <= 1) return;
     let ws; try { ws = new WebSocket(RTDS_URL); } catch { return; }
     rtds.ws = ws; rtds.last = Date.now(); rtds.got = false; state.status.chainlink = "connecting";
+    feedEpoch++;
     ws.onopen = () => {
       rtds.retry = 0;
       const sub = JSON.stringify({ action: "subscribe", subscriptions: [{ topic: "crypto_prices_chainlink", type: "update" }] });
@@ -537,6 +554,7 @@ window.BlueEdgeData = (() => {
     };
     ws.onerror = () => {};
     ws.onclose = () => {
+      feedEpoch++;
       clearInterval(rtds.ping);
       state.status.chainlink = "reconnecting"; emit("status");
       rtds.timer = setTimeout(connectRtds, Math.min(30000, 1000 * 2 ** rtds.retry++));
@@ -558,7 +576,6 @@ window.BlueEdgeData = (() => {
   // each route: where to ask and how to read the answer. The first one that works is remembered.
   const PTB_ROUTES = [
     { name: "polymarket", proxy: "", kind: "crypto" },
-    { name: "polymarket-equity", proxy: "", kind: "equity" },
     { name: "relay-1", proxy: "codetabs", kind: "crypto" },
     { name: "relay-2", proxy: "allorigins", kind: "crypto" }
   ];
@@ -611,9 +628,22 @@ window.BlueEdgeData = (() => {
     return o;
   }
 
+  state.ptbCheck = { checked: 0, matched: 0, worst: 0, seen: {} };
   function applyMeta(n) {
     if (!n.metaOpen && !n.metaClose) return;
     const o = official[n.id] || (official[n.id] = {});
+    if (n.metaOpen) {
+      o.gamma = true;
+      const cap = captured[`${n.asset}:${n.start}`];
+      if (cap != null && !state.ptbCheck.seen[n.id] && n.tf !== 60) {
+        state.ptbCheck.seen[n.id] = true; state.ptbCheck.checked++;
+        const diff = Math.abs(cap - n.metaOpen);
+        if (diff <= Math.max(1e-9, n.metaOpen * 1e-7)) state.ptbCheck.matched++;
+        state.ptbCheck.worst = Math.max(state.ptbCheck.worst, diff);
+        if (diff > n.metaOpen * 1e-7) { captured[`${n.asset}:${n.start}`] = n.metaOpen; saveCaptured(); }   // Polymarket's value wins
+        emit("status");
+      }
+    }
     if (n.metaOpen) { o.open = n.metaOpen; o.src = "Polymarket"; }
     if (n.metaClose) { o.close = n.metaClose; if (o.open) o.done = true; }
     emitSoon("spot", 300);
@@ -623,7 +653,7 @@ window.BlueEdgeData = (() => {
   async function refreshPriceToBeat() {
     const now = Date.now();
     if (now - ptbAt < 12000) return;
-    const need = [...state.markets.values()].filter(m => m.start <= now - 3000 && m.end > now - 120000 && !(official[m.id]?.open && (m.end > now || official[m.id]?.close)));
+    const need = [...state.markets.values()].filter(m => m.start <= now - 3000 && m.end > now - 30 * 60000 && !(official[m.id]?.gamma && official[m.id]?.close));
     if (!need.length) return;
     ptbAt = now;
     const slugs = need.sort((a, b) => b.start - a.start).slice(0, 20).map(m => m.slug);
