@@ -382,7 +382,7 @@
   let settling = false;
   async function settlePaper() {
     if (settling || !isLeader()) return;
-    const due = openTrades().filter(t => Date.now() > t.end + 4000);
+    const due = trades.filter(t => Date.now() > t.end + 4000 && (t.status === "open" || (t.official === false && (t.status === "won" || t.status === "lost"))));
     if (!due.length) return;
     settling = true;
     try {
@@ -393,19 +393,33 @@
       reloadBook();
       let changed = 0;
       for (const t of trades) {
-        if (t.status !== "open" || !(t.id in results)) continue;
+        if (!(t.id in results)) continue;
         const r = results[t.id];
-        if (!r) {
-          if (Date.now() > t.end + 20 * 60000) { // no result from any source after 20 minutes: refund instead of staying stuck
-            Object.assign(t, { status: "void", exit: t.entry, closedAt: Date.now(), pnl: 0, note: "Refunded, no result" });
-            account.cash += t.cost + t.fee; changed++;
+        if (t.status === "open") {
+          if (!r) {
+            if (Date.now() > t.end + 20 * 60000) { // no result from any source after 20 minutes: refund instead of staying stuck
+              Object.assign(t, { status: "void", exit: t.entry, closedAt: Date.now(), pnl: 0, note: "Refunded, no result" });
+              account.cash += t.cost + t.fee; changed++;
+            }
+            continue;
           }
-          continue;
+          const won = r.winner === t.side, payout = won ? t.shares : 0;
+          Object.assign(t, { status: won ? "won" : "lost", exit: won ? 1 : 0, closedAt: Date.now(), pnl: payout - t.cost - t.fee, note: `Resolved ${r.winner}${r.official ? "" : " (est.)"}`, official: r.official });
+          account.cash += payout; changed++;
+          toast(`${t.asset} ${tfShort(t.tf)} resolved ${r.winner}${r.official ? "" : " (estimated)"}. Paper ${won ? "win" : "loss"}: ${money(t.pnl, true)}.`, won ? "good" : "bad");
+        } else if (r?.official && t.official === false) {
+          // already settled on an unofficial estimate — now that Polymarket has confirmed, correct it if needed
+          const won = r.winner === t.side, payout = won ? t.shares : 0;
+          const prevPayout = t.status === "won" ? t.shares : 0;
+          if (Math.abs(payout - prevPayout) > 1e-9) {
+            account.cash += payout - prevPayout;
+            Object.assign(t, { status: won ? "won" : "lost", exit: won ? 1 : 0, pnl: payout - t.cost - t.fee, note: `Resolved ${r.winner} (confirmed, corrected from estimate)`, official: true });
+            changed++;
+            toast(`${t.asset} ${tfShort(t.tf)} correction: Polymarket confirmed ${r.winner}. Paper ${won ? "win" : "loss"}: ${money(t.pnl, true)}.`, won ? "good" : "bad");
+          } else {
+            t.official = true; t.note = `Resolved ${r.winner} (confirmed)`; changed++;
+          }
         }
-        const won = r.winner === t.side, payout = won ? t.shares : 0;
-        Object.assign(t, { status: won ? "won" : "lost", exit: won ? 1 : 0, closedAt: Date.now(), pnl: payout - t.cost - t.fee, note: `Resolved ${r.winner}${r.official ? "" : " (est.)"}`, official: r.official });
-        account.cash += payout; changed++;
-        toast(`${t.asset} ${tfShort(t.tf)} resolved ${r.winner}${r.official ? "" : " (estimated)"}. Paper ${won ? "win" : "loss"}: ${money(t.pnl, true)}.`, won ? "good" : "bad");
       }
       if (changed) { saveAccount(); saveTrades(); watchOpen(); render(); }
     } catch (e) { console.warn("Settlement check failed:", e.message); }
