@@ -76,12 +76,12 @@
   function vm(m, now = Date.now()) {
     const ub = D.bookFor(m.upToken), db = D.bookFor(m.downToken);
     const ptb = D.priceToBeat(m), lp = D.livePrice(m);
-    const ctx = { now, up: { bid: ub.bid ?? null, ask: ub.ask ?? null }, down: { bid: db.bid ?? null, ask: db.ask ?? null }, open: ptb?.price ?? null, openSource: ptb?.source || "", openNote: ptb?.note || "", openExact: ptb ? !!ptb.exact : false, spot: lp?.price ?? null, spotSource: lp?.source || "" };
+    const ctx = { now, up: { bid: ub.bid ?? null, ask: ub.ask ?? null }, down: { bid: db.bid ?? null, ask: db.ask ?? null }, open: ptb?.exact ? ptb.price : null, shownOpen: ptb?.price ?? null, openExact: !!ptb?.exact, openSource: ptb?.source || "", spot: lp?.price ?? null, spotSource: lp?.source || "" };
     const um = mid(ctx.up), dm = mid(ctx.down);
     return {
       m, ctx, decision: S.evaluate(strategy, m, ctx), res: D.resolutionFor(m.id),
       upProb: um != null ? um : dm != null ? 1 - dm : null,
-      move: ctx.open != null && ctx.spot != null ? (ctx.spot - ctx.open) / ctx.open : null,
+      move: ctx.shownOpen != null && ctx.spot != null ? (ctx.spot - ctx.shownOpen) / ctx.shownOpen : null,
       live: m.start <= now && m.end > now, left: m.end - now,
       progress: Math.min(1, Math.max(0, (now - m.start) / (m.end - m.start)))
     };
@@ -159,14 +159,14 @@
     set(field(el, "upAsk"), cents(v.ctx.up.ask));
     set(field(el, "downAsk"), cents(v.ctx.down.ask));
     field(el, "split").style.transform = `scaleX(${(v.upProb ?? 0.5).toFixed(4)})`;
-    set(field(el, "spot"), v.ctx.open != null ? `To beat ${fmtPrice(v.ctx.open)}` : v.m.start > now ? "To beat: set at open" : "To beat: loading from Polymarket…");
+    set(field(el, "spot"), v.ctx.shownOpen != null ? `To beat ${v.ctx.openExact ? "" : "~"}${fmtPrice(v.ctx.shownOpen)}` : v.m.start > now ? "To beat: set at open" : "To beat: …");
     const mv = field(el, "move");
     set(mv, v.ctx.spot == null ? "" : `${fmtPrice(v.ctx.spot)}${v.move == null ? "" : ` ${v.move >= 0 ? "▲" : "▼"}${(Math.abs(v.move) * 100).toFixed(3)}%`}`);
     mv.className = v.move == null ? "" : v.move >= 0 ? "gain" : "loss";
     const held = holdingFor(v.m);
     const st = field(el, "status");
     if (ended) {
-      set(st, v.res ? `Resolved ${v.res.winner}${v.res.official ? "" : " (from price feed)"}${held ? `, you held ${held.side}` : ""}` : "Waiting for the official result…");
+      set(st, v.res ? `Resolved ${v.res.winner}${v.res.official ? "" : " (estimated)"}${held ? `, you held ${held.side}` : ""}` : "Waiting for the official result…");
       st.className = "mc-status " + (v.res ? (v.res.winner === "Up" ? "res-up" : "res-down") : "wait");
     } else {
       set(st, held ? `You hold ${held.side}` : v.decision.reason);
@@ -247,7 +247,7 @@
       rows: [["Shares", t.shares.toFixed(2)], ["Entry price", cents(t.entry)], ["Cost", money(t.cost)], ["Fees", money((t.fee || 0) + (t.exitFee || 0))],
         ["Exit price", t.exit != null ? cents(t.exit) : t.status === "open" ? `now ${cents(bid)}` : "—"], ["P/L", t.pnl != null ? money(t.pnl, true) : "—", signClass(t.pnl)],
         ["Window", `${new Date(t.start).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} – ${new Date(t.end).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`],
-        ["Resolved", res ? `${res.winner}${res.official ? " (official)" : " (from price feed)"}` : t.status === "open" ? "Not yet" : (t.note || "—")], ["Placed by", t.source === "bot" ? "Bot" : "You"]],
+        ["Resolved", res ? `${res.winner}${res.official ? " (official)" : " (estimated)"}` : t.status === "open" ? "Not yet" : (t.note || "—")], ["Placed by", t.source === "bot" ? "Bot" : "You"]],
       url: t.url
     });
   }
@@ -298,14 +298,14 @@
     const tf = { hour: "numeric", minute: "2-digit" };
     set(f("window"), `${new Date(m.start).toLocaleTimeString([], tf)} – ${new Date(m.end).toLocaleTimeString([], tf)}`);
     set(f("left"), v.live ? clock(v.left) : m.start > now ? clock(m.start - now) : "0:00");
-    set(f("leftLabel"), v.live ? "left in this window" : m.start > now ? "until this window opens" : v.res ? `resolved ${v.res.winner}${v.res.official ? " (official)" : " (from price feed)"}` : "closed, waiting for result");
+    set(f("leftLabel"), v.live ? "left in this window" : m.start > now ? "until this window opens" : v.res ? `resolved ${v.res.winner}${v.res.official ? " (official)" : " (estimated)"}` : "closed, waiting for result");
     f("progress").style.transform = `scaleX(${v.progress.toFixed(4)})`;
     set(f("upAsk"), cents(v.ctx.up.ask)); set(f("downAsk"), cents(v.ctx.down.ask));
     set(f("upBid"), `sell ${cents(v.ctx.up.bid)}`); set(f("downBid"), `sell ${cents(v.ctx.down.bid)}`);
     $$(".side", el).forEach(b => b.setAttribute("aria-checked", String(b.dataset.side === side)));
-    set(f("open"), v.ctx.open == null ? (m.start > now ? `Set when it opens in ${clock(m.start - now)}` : (v.ctx.openNote || "Loading Polymarket's price to beat…")) : `${fmtPrice(v.ctx.open)} ${v.ctx.openSource ? `(${v.ctx.openSource})` : ""}`);
+    set(f("open"), v.ctx.shownOpen == null ? (m.start > now ? `Set when it opens in ${clock(m.start - now)}` : "…") : `${v.ctx.openExact ? "" : "~"}${fmtPrice(v.ctx.shownOpen)} (${v.ctx.openSource}${v.ctx.openExact ? "" : "; exact from the next window"})`);
     set(f("spot"), v.ctx.spot == null ? "—" : `${fmtPrice(v.ctx.spot)} ${v.ctx.spotSource ? `(${v.ctx.spotSource})` : ""}`);
-    const mv = f("move"); set(mv, v.move == null ? "—" : `${v.move >= 0 ? "+" : "−"}$${Math.abs(v.ctx.spot - v.ctx.open).toFixed(v.ctx.open >= 100 ? 2 : v.ctx.open >= 1 ? 4 : 5)} ${v.move >= 0 ? "above" : "below"} (${(Math.abs(v.move) * 100).toFixed(3)}%)`);
+    const mv = f("move"); set(mv, v.move == null ? "—" : `${v.move >= 0 ? "+" : "−"}$${Math.abs(v.ctx.spot - v.ctx.shownOpen).toFixed(v.ctx.shownOpen >= 100 ? 2 : v.ctx.shownOpen >= 1 ? 4 : 5)} ${v.move >= 0 ? "above" : "below"} (${(Math.abs(v.move) * 100).toFixed(3)}%)`);
     set(f("liq"), m.liquidity ? "$" + Math.round(m.liquidity).toLocaleString() : "—");
 
     const live = isLive();
@@ -402,9 +402,9 @@
           continue;
         }
         const won = r.winner === t.side, payout = won ? t.shares : 0;
-        Object.assign(t, { status: won ? "won" : "lost", exit: won ? 1 : 0, closedAt: Date.now(), pnl: payout - t.cost - t.fee, note: `Resolved ${r.winner}${r.official ? "" : " (price feed)"}`, official: r.official });
+        Object.assign(t, { status: won ? "won" : "lost", exit: won ? 1 : 0, closedAt: Date.now(), pnl: payout - t.cost - t.fee, note: `Resolved ${r.winner}${r.official ? "" : " (est.)"}`, official: r.official });
         account.cash += payout; changed++;
-        toast(`${t.asset} ${tfShort(t.tf)} resolved ${r.winner}${r.official ? "" : " (from price feed)"}. Paper ${won ? "win" : "loss"}: ${money(t.pnl, true)}.`, won ? "good" : "bad");
+        toast(`${t.asset} ${tfShort(t.tf)} resolved ${r.winner}${r.official ? "" : " (estimated)"}. Paper ${won ? "win" : "loss"}: ${money(t.pnl, true)}.`, won ? "good" : "bad");
       }
       if (changed) { saveAccount(); saveTrades(); watchOpen(); render(); }
     } catch (e) { console.warn("Settlement check failed:", e.message); }
@@ -960,13 +960,10 @@
     const rows = [
       [s.gamma, "Polymarket markets", s.lastDiscovery ? `${s.gammaMsg}. Checked ${Math.round((now - s.lastDiscovery) / 1000)}s ago, ${perMin} request${perMin === 1 ? "" : "s"} in the last minute.` : s.gammaMsg || "Starting up"],
       [s.poly, "Polymarket order books", `${s.polyTokens} outcome prices streaming, with a REST refresh for any that go quiet.`],
-      [s.ptbApi === "direct" || s.ptbApi === "relay" ? "live" : s.ptbApi === "blocked" ? "error" : "connecting", "Polymarket price to beat", s.ptbApi === "direct" ? "Reading Polymarket's price-to-beat API directly." : s.ptbApi === "relay" ? "Reading Polymarket's price-to-beat API through your relay." : s.ptbApi === "blocked" ? "Your browser blocks polymarket.com from other sites. Add a relay below so BlueEdge can read Polymarket's exact price to beat. Until then it uses the live Chainlink capture." : "Checking…"],
-      [D.state.ptbCheck.checked ? (D.state.ptbCheck.matched === D.state.ptbCheck.checked ? "live" : "error") : "connecting", "Price to beat accuracy check", D.state.ptbCheck.checked ? `${D.state.ptbCheck.matched} of ${D.state.ptbCheck.checked} captured windows matched Polymarket's API exactly${D.state.ptbCheck.worstDiff ? ` (largest gap $${D.state.ptbCheck.worstDiff.toFixed(4)})` : ""}.` : "Compares BlueEdge's Chainlink capture with Polymarket's API as windows resolve (needs the API to be reachable)."],
       [s.chainlink, "Chainlink prices (price to beat)", "Polymarket's live oracle feed that 5 and 15 minute markets resolve on."],
       [s.binance, "Binance feed", s.binanceHost ? `Using ${s.binanceHost}. Falls back to other Binance hosts automatically.` : "Starts once markets are found."],
       [L.isUnlocked() ? (L.canTrade() && L.state.stream !== "live" ? "connecting" : "live") : L.hasVault() ? "idle" : "offline", "Live account", L.isUnlocked() ? (L.canTrade() ? "L1 + L2 connected. Updates stream from Polymarket, with a backup refresh every 20 seconds." : "L2 read-only. Balance and orders refresh every 15 seconds.") : L.hasVault() ? "Saved and locked." : "Not connected."]
     ];
-    const ri = $("#ptbRelayInput"); if (ri && document.activeElement !== ri && !ri.value) ri.value = D.getPtbRelay();
     html($("#connList"), rows.map(([x, name, detail]) => `<li><i class="dot ${cls(x)}"></i><div><b>${name}</b> <span class="tag-lite">${label(x)}</span><p>${esc(detail)}</p></div></li>`).join(""));
   }
 
@@ -1176,11 +1173,6 @@
   $("#maxOpenInput").addEventListener("input", e => { const v = parseInt(e.target.value.replace(/\D/g, ""), 10); if (v >= 1) { strategy.maxOpen = Math.min(20, v); S.save(strategy); render(); } });
   $("#maxOpenInput").addEventListener("blur", e => { e.target.value = String(strategy.maxOpen); });
   $("#maxOpenInput").addEventListener("focus", e => e.target.select());
-  $("#ptbRelaySave").addEventListener("click", () => {
-    const v = $("#ptbRelayInput").value.trim();
-    if (v && !/^https:\/\/[a-z0-9.-]+\.workers\.dev(\/.*)?$/i.test(v)) { toast("Use your Cloudflare Worker address, like https://blueedge-ptb.yourname.workers.dev", "bad"); return; }
-    D.setPtbRelay(v); toast(v ? "Relay saved. Checking Polymarket's price to beat…" : "Relay removed.", "good"); render();
-  });
   $("#refreshSelect").addEventListener("change", e => { reloadBook(); account.refreshSec = Number(e.target.value); saveAccount(); D.setDiscoveryInterval(account.refreshSec); toast("Market refresh interval updated.", "info"); });
   const balanceInput = () => { const v = parseFloat($("#startInput").value.replace(/[^0-9.]/g, "")); if (!(v >= 10)) { toast("Enter a paper balance of at least $10.", "bad"); return null; } return Math.round(v * 100) / 100; };
   $("#setBalance").addEventListener("click", () => {

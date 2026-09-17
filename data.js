@@ -481,31 +481,22 @@ window.BlueEdgeData = (() => {
   /* ---------- Chainlink prices from Polymarket RTDS (what 5m/15m markets resolve on) ---------- */
   const RTDS_URL = "wss://ws-live-data.polymarket.com";
   const rtds = { ws: null, retry: 0, last: 0, timer: null, ping: null };
-  const ticks = {};       // asset -> [{t, p}] every tick, kept 75 minutes (used for closes)
-  const lastTick = {};    // asset -> newest {t, p}
-  // Price to beat = first Chainlink price at/after the window start. Captured live at each 5-minute boundary
-  // (15m windows start on 5m boundaries too) and saved on the device so a reload keeps it.
+  const ticks = {};      // asset -> [{t, p}] every tick, kept 75 minutes
+  const lastTick = {};   // asset -> newest {t, p}
   const CAP_KEY = "blueedge.ptb.v1";
   const captured = (() => { try { const c = JSON.parse(localStorage.getItem(CAP_KEY) || "{}"); const cut = Date.now() - 3 * 3600e3; for (const k in c) if (Number(k.split(":")[1]) < cut) delete c[k]; return c; } catch { return {}; } })();
-  let capSaveTimer = null;
-  const saveCaptured = () => { clearTimeout(capSaveTimer); capSaveTimer = setTimeout(() => { try { localStorage.setItem(CAP_KEY, JSON.stringify(captured)); } catch {} }, 500); };
+  let capSave = null;
+  const saveCaptured = () => { clearTimeout(capSave); capSave = setTimeout(() => { try { localStorage.setItem(CAP_KEY, JSON.stringify(captured)); } catch {} }, 500); };
   function addTick(asset, t, p) {
     const prev = lastTick[asset];
-    if (prev && t <= prev.t) {
-      if (t === prev.t) return;
-      const arr = ticks[asset] || (ticks[asset] = []); arr.push({ t, p }); arr.sort((a, b) => a.t - b.t); // late/out-of-order tick
-      return;
-    }
+    const arr = ticks[asset] || (ticks[asset] = []);
+    if (prev && t <= prev.t) { if (t < prev.t) { arr.push({ t, p }); arr.sort((a, b) => a.t - b.t); } return; }
     if (prev) {
       const boundary = Math.floor(t / 300000) * 300000;
-      // we must have seen a tick just before the boundary, so this is truly the first tick at/after it
-      if (prev.t < boundary && boundary - prev.t <= 15000) {
-        const key = `${asset}:${boundary}`;
-        if (captured[key] == null) { captured[key] = p; saveCaptured(); emitSoon("spot", 100); }
-      }
+      // exact: we saw a tick just before the boundary, so this one is the first at/after it
+      if (prev.t < boundary && boundary - prev.t <= 15000 && captured[`${asset}:${boundary}`] == null) { captured[`${asset}:${boundary}`] = p; saveCaptured(); emitSoon("spot", 100); }
     }
     lastTick[asset] = { t, p };
-    const arr = ticks[asset] || (ticks[asset] = []);
     arr.push({ t, p });
     const cutoff = Date.now() - 75 * 60000;
     while (arr.length && arr[0].t < cutoff) arr.shift();
@@ -520,7 +511,7 @@ window.BlueEdgeData = (() => {
       rtds.retry = 0;
       const sub = JSON.stringify({ action: "subscribe", subscriptions: [{ topic: "crypto_prices_chainlink", type: "update" }] });
       ws.send(sub);
-      setTimeout(() => { if (rtds.ws === ws && ws.readyState === 1 && !rtds.got) ws.send(sub); }, 8000); // resend once if silent
+      setTimeout(() => { if (rtds.ws === ws && ws.readyState === 1 && !rtds.got) ws.send(sub); }, 8000);
       clearInterval(rtds.ping);
       rtds.ping = setInterval(() => {
         if (ws.readyState !== 1) return;
@@ -536,7 +527,7 @@ window.BlueEdgeData = (() => {
       const sym = String(d.payload.symbol || "").toLowerCase(), asset = sym.split("/")[0].toUpperCase();
       if (!asset) return;
       const items = (Array.isArray(d.payload.data) ? d.payload.data : [d.payload])
-        .map(it => { let t = Number(it.timestamp ?? it.ts ?? d.timestamp); if (t && t < 1e12) t *= 1000; return { t: t || Date.now(), p: Number(it.value ?? it.price) }; })
+        .map(it => { let t = Number(it.timestamp ?? d.timestamp); if (t && t < 1e12) t *= 1000; return { t: t || Date.now(), p: Number(it.value ?? it.price) }; })
         .filter(x => x.p > 0).sort((a, b) => a.t - b.t);
       rtds.got = true;
       for (const x of items) addTick(asset, x.t, x.p);
@@ -558,66 +549,26 @@ window.BlueEdgeData = (() => {
   }
 
   /* ---------- official window prices from polymarket.com (best effort; disabled if the browser blocks it) ---------- */
-  const official = {};
-  const PTB_API = "https://polymarket.com/api/crypto/crypto-price";
+  const official = {}; let officialPauseUntil = 0, officialFails = 0, officialLast = 0;
   const VARIANT = { 5: "fiveminute", 15: "fifteen", 60: "hourly" };
-  const isoSec = ms => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z"); // API expects 2026-09-17T01:15:00Z
-  const RELAY_KEY = "blueedge.ptbRelay";
-  const routeDown = {}; let ptbLastCall = 0;
-  state.status.ptbApi = "checking"; // checking | direct | relay | blocked
-  state.ptbCheck = { checked: 0, matched: 0, worstDiff: 0, seen: {} };
-  function ptbRoutes() {
-    const relay = String(localStorage.getItem(RELAY_KEY) || "").trim().replace(/\/+$/, "");
-    const routes = [{ name: "direct", url: q => `${PTB_API}?${q}` }];
-    if (/^https:\/\//.test(relay)) routes.push({ name: "relay", url: q => `${relay}?${q}` });
-    return routes.sort((a, b) => (a.name === state.status.ptbApi ? -1 : b.name === state.status.ptbApi ? 1 : 0));
-  }
-  function recordCheck(m, o) {
-    const cap = captured[`${m.asset}:${m.start}`];
-    if (!(o.open > 0) || cap == null || state.ptbCheck.seen[m.id] || usesBinance(m)) return;
-    const diff = Math.abs(o.open - cap);
-    state.ptbCheck.seen[m.id] = true;
-    state.ptbCheck.checked++;
-    if (diff <= Math.max(0.005, o.open * 1e-6)) state.ptbCheck.matched++;
-    state.ptbCheck.worstDiff = Math.max(state.ptbCheck.worstDiff, diff);
-  }
-  async function fetchOfficial(m, { force = false } = {}) {
+  const isoSec = ms => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
+  async function fetchOfficial(m, force = false) {
     const o = official[m.id] || (official[m.id] = {});
-    if (o.done) return o;
     const now = Date.now();
-    if (o.open && m.end > now && !force) return o;             // price to beat never changes once a window opens
-    if (!force && now - (o.at || 0) < (o.open ? 30000 : 8000)) return o;
-    if (now - ptbLastCall < 700) return o;                    // ≤ ~1.4 requests/second overall
-    const routes = ptbRoutes().filter(r => now >= (routeDown[r.name] || 0));
-    if (!routes.length) { state.status.ptbApi = "blocked"; return o; }
-    o.at = now; ptbLastCall = now;
-    const q = new URLSearchParams({ symbol: m.asset, eventStartTime: isoSec(m.start), variant: VARIANT[m.tf], endDate: isoSec(m.end) }).toString();
-    for (const r of routes) {
-      try {
-        const res = await fetch(r.url(q), { cache: "no-store" });
-        if (res.status === 429) { routeDown[r.name] = Date.now() + 60000; continue; }
-        if (!res.ok) throw new Error(res.status);
-        const j = await res.json();
-        const open = Number(j.openPrice), close = j.closePrice != null ? Number(j.closePrice) : null;
-        if (open > 0) o.open = open;
-        if (close > 0) o.close = close;
-        if (j.completed && o.open && o.close) o.done = true;
-        if (state.status.ptbApi !== r.name) { state.status.ptbApi = r.name; emit("status"); }
-        recordCheck(m, o);
-        emitSoon("spot", 150);
-        return o;
-      } catch {
-        routeDown[r.name] = Date.now() + 5 * 60000; // CORS-blocked or offline: try again in 5 minutes
-      }
-    }
-    if (state.status.ptbApi !== "blocked") { state.status.ptbApi = "blocked"; emit("status"); }
+    if (o.done || (o.open && m.end > now && !force)) return o;          // price to beat never changes once set
+    if (now < officialPauseUntil || now - (o.at || 0) < 20000 || now - officialLast < 700) return o;
+    o.at = now; officialLast = now;
+    try {
+      const q = new URLSearchParams({ symbol: m.asset, eventStartTime: isoSec(m.start), variant: VARIANT[m.tf], endDate: isoSec(m.end) });
+      const r = await fetch(`https://polymarket.com/api/crypto/crypto-price?${q}`, { cache: "no-store" });
+      if (!r.ok) throw new Error(r.status);
+      const j = await r.json(); officialFails = 0;
+      if (Number(j.openPrice) > 0) o.open = Number(j.openPrice);
+      if (j.closePrice != null && Number(j.closePrice) > 0) o.close = Number(j.closePrice);
+      if (j.completed && o.open && o.close) o.done = true;
+      emitSoon("spot", 150);
+    } catch { if (++officialFails >= 3) { officialFails = 0; officialPauseUntil = Date.now() + 5 * 60000; } }
     return o;
-  }
-  function setPtbRelay(url) {
-    localStorage.setItem(RELAY_KEY, String(url || "").trim());
-    delete routeDown.relay; delete routeDown.direct; state.status.ptbApi = "checking";
-    for (const m of state.markets.values()) if (official[m.id] && !official[m.id].open) official[m.id].at = 0;
-    emit("status");
   }
 
   function applyMeta(n) {
@@ -651,16 +602,14 @@ window.BlueEdgeData = (() => {
       }
     } catch {}
   }
-  // 1 hour markets settle on the Binance BTC/USDT-style 1h candle; 5m/15m on Chainlink
   const usesBinance = m => m.tf === 60 || /binance/.test(m.resolutionSource || "");
   const binOpen = {}, binOpenAt = {};
-  const GLOBAL_BINANCE = ["https://data-api.binance.vision", "https://api.binance.com", "https://api-gcp.binance.com"];
   async function fetchBinanceOpen(m) {
     const key = `${m.asset}:${m.tf}:${m.start}`;
     if (binOpen[key] != null || Date.now() - (binOpenAt[key] || 0) < 20000) return;
     binOpenAt[key] = Date.now();
     const interval = { 5: "5m", 15: "15m", 60: "1h" }[m.tf];
-    for (const host of GLOBAL_BINANCE) {
+    for (const host of ["https://data-api.binance.vision", "https://api.binance.com", "https://api-gcp.binance.com"]) {
       try {
         const r = await fetch(`${host}/api/v3/klines?symbol=${m.asset}USDT&interval=${interval}&startTime=${m.start}&limit=1`, { cache: "no-store" });
         if (r.status === 400) return;
@@ -673,21 +622,21 @@ window.BlueEdgeData = (() => {
   }
   function priceToBeat(m) {
     const now = Date.now();
-    if (m.start > now) return { price: null, source: "", pending: true, note: "Set by Polymarket when the window opens" };
+    if (m.start > now) return { price: null, source: "", pending: true };
     const o = official[m.id];
     if (o?.open > 0) return { price: o.open, source: "Polymarket", exact: true };
     fetchOfficial(m);
+    const key = `${m.asset}:${m.tf}:${m.start}`;
     if (usesBinance(m)) {
-      const key = `${m.asset}:${m.tf}:${m.start}`;
-      if (binOpen[key] != null) return { price: binOpen[key], source: "Binance 1h open", exact: true };
-      fetchBinanceOpen(m);
-    } else {
-      const cap = captured[`${m.asset}:${m.start}`];
-      if (cap != null) return { price: cap, source: "Chainlink", exact: true };
+      const b = binOpen[key] ?? null;
+      if (b == null) fetchBinanceOpen(m);
+      return b != null ? { price: b, source: "Binance 1h open", exact: true } : null;
     }
-    const blocked = state.status.ptbApi === "blocked";
-    return { price: null, source: "", exact: false, blocked,
-      note: blocked ? "Waiting for Polymarket's price to beat. Add the price-to-beat relay in Settings to load it right away." : "Loading Polymarket's price to beat…" };
+    const cap = captured[`${m.asset}:${m.start}`];
+    if (cap != null) return { price: cap, source: "Chainlink", exact: true };
+    const b = binOpen[key] ?? state.opens[key] ?? null;
+    if (b == null) fetchBinanceOpen(m);
+    return b != null ? { price: b, source: "Binance open", exact: false } : null;
   }
   function livePrice(m) {
     const c = state.chainlink[m.asset], s = state.spot[m.asset];
@@ -738,13 +687,13 @@ window.BlueEdgeData = (() => {
         if (w) return setRes(m, /^(up|yes)$/i.test(w) ? "Up" : "Down", "Polymarket", true);
       } catch {}
     }
-    const o = await fetchOfficial(m, { force: true });
+    const o = await fetchOfficial(m, true);
     if (o?.done && o.open > 0 && o.close > 0) return setRes(m, o.close >= o.open ? "Up" : "Down", "Polymarket prices", true);
     if (now > m.end + estimateAfterMs) {
       const ptb = priceToBeat(m);
-      const clClose = usesBinance(m) ? null : chainlinkAt(m.asset, m.end);
-      if (ptb?.exact && ptb.source === "Chainlink" && clClose != null) return setRes(m, clClose >= ptb.price ? "Up" : "Down", "Chainlink", false);
-      if (usesBinance(m) && ptb?.exact) { const bClose = await binanceClose(m); if (bClose != null) return setRes(m, bClose >= ptb.price ? "Up" : "Down", "Binance 1h candle", false); }
+      if (ptb?.exact && ptb.source === "Chainlink") { const c = chainlinkAt(m.asset, m.end); if (c != null) return setRes(m, c >= ptb.price ? "Up" : "Down", "Chainlink", false); }
+      if (ptb?.exact && usesBinance(m)) { const c = await binanceClose(m); if (c != null) return setRes(m, c >= ptb.price ? "Up" : "Down", "Binance 1h candle", false); }
+      if (!ptb?.exact) { const c = await binanceClose(m), b = state.opens[`${m.asset}:${m.tf}:${m.start}`]; if (b != null && c != null) return setRes(m, c >= b ? "Up" : "Down", "Binance candle", false); }
     }
     return state.resolutions[m.id] || null;
   }
@@ -812,8 +761,7 @@ window.BlueEdgeData = (() => {
   }
 
   return {
-    state, on, discover, startLoop, setDiscoveryInterval: setInterval_, fetchResolutions, priceToBeat, livePrice, resolve, setPtbRelay,
-    getPtbRelay: () => localStorage.getItem("blueedge.ptbRelay") || "",
+    state, on, discover, startLoop, setDiscoveryInterval: setInterval_, fetchResolutions, priceToBeat, livePrice, resolve,
     resolutionFor: id => state.resolutions[id] || null,
     bookFor, openFor, spotFor, markets, watch, TIMEFRAMES
   };
