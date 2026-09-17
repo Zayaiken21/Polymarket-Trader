@@ -287,8 +287,6 @@ window.BlueEdgeData = (() => {
       refreshStaleBooks();
       refreshPriceToBeat();
       if (now % 5000 < 1000) resolverTick();
-      // make sure we hold a fresh window-open price for live markets that weren't open when the app loaded
-      for (const m of state.markets.values()) if (m.start <= now && m.end > now && !usesBinance(m) && chainlinkAt(m.asset, m.start) == null && !official[m.id]?.open && officialFails < 3 && now - (official[m.id]?.at || 0) > 60000) { fetchOfficial(m); break; }
     }, 1000);
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden && Date.now() - state.status.lastDiscovery > 15000) discover();
@@ -483,26 +481,49 @@ window.BlueEdgeData = (() => {
   /* ---------- Chainlink prices from Polymarket RTDS (what 5m/15m markets resolve on) ---------- */
   const RTDS_URL = "wss://ws-live-data.polymarket.com";
   const rtds = { ws: null, retry: 0, last: 0, timer: null, ping: null };
-  const ticks = {}; // asset -> [{t, p}] kept for 75 minutes, max one per second
+  const ticks = {};       // asset -> [{t, p}] every tick, kept 75 minutes (used for closes)
+  const lastTick = {};    // asset -> newest {t, p}
+  // Price to beat = first Chainlink price at/after the window start. Captured live at each 5-minute boundary
+  // (15m windows start on 5m boundaries too) and saved on the device so a reload keeps it.
+  const CAP_KEY = "blueedge.ptb.v1";
+  const captured = (() => { try { const c = JSON.parse(localStorage.getItem(CAP_KEY) || "{}"); const cut = Date.now() - 3 * 3600e3; for (const k in c) if (Number(k.split(":")[1]) < cut) delete c[k]; return c; } catch { return {}; } })();
+  let capSaveTimer = null;
+  const saveCaptured = () => { clearTimeout(capSaveTimer); capSaveTimer = setTimeout(() => { try { localStorage.setItem(CAP_KEY, JSON.stringify(captured)); } catch {} }, 500); };
   function addTick(asset, t, p) {
+    const prev = lastTick[asset];
+    if (prev && t <= prev.t) {
+      if (t === prev.t) return;
+      const arr = ticks[asset] || (ticks[asset] = []); arr.push({ t, p }); arr.sort((a, b) => a.t - b.t); // late/out-of-order tick
+      return;
+    }
+    if (prev) {
+      const boundary = Math.floor(t / 300000) * 300000;
+      // we must have seen a tick just before the boundary, so this is truly the first tick at/after it
+      if (prev.t < boundary && boundary - prev.t <= 15000) {
+        const key = `${asset}:${boundary}`;
+        if (captured[key] == null) { captured[key] = p; saveCaptured(); emitSoon("spot", 100); }
+      }
+    }
+    lastTick[asset] = { t, p };
     const arr = ticks[asset] || (ticks[asset] = []);
-    const last = arr[arr.length - 1];
-    if (last && Math.floor(last.t / 1000) === Math.floor(t / 1000)) last.p = p, last.t = Math.max(last.t, t);
-    else if (!last || t > last.t) arr.push({ t, p });
-    else { arr.push({ t, p }); arr.sort((a, b) => a.t - b.t); }
+    arr.push({ t, p });
     const cutoff = Date.now() - 75 * 60000;
     while (arr.length && arr[0].t < cutoff) arr.shift();
-    const newest = arr[arr.length - 1];
-    state.chainlink[asset] = { price: newest.p, ts: newest.t };
+    state.chainlink[asset] = { price: p, ts: t };
   }
   function connectRtds() {
     clearTimeout(rtds.timer); rtds.timer = null;
     if (rtds.ws && rtds.ws.readyState <= 1) return;
     let ws; try { ws = new WebSocket(RTDS_URL); } catch { return; }
-    rtds.ws = ws; rtds.last = Date.now(); state.status.chainlink = "connecting";
+    rtds.ws = ws; rtds.last = Date.now(); rtds.got = false; state.status.chainlink = "connecting";
     ws.onopen = () => {
       rtds.retry = 0;
       ws.send(JSON.stringify({ action: "subscribe", subscriptions: [{ topic: "crypto_prices_chainlink", type: "*", filters: "" }] }));
+      setTimeout(() => {
+        if (rtds.ws !== ws || ws.readyState !== 1 || rtds.got) return;
+        const assets = new Set(["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB", "HYPE", ...[...state.markets.values()].map(m => m.asset)]);
+        ws.send(JSON.stringify({ action: "subscribe", subscriptions: [...assets].map(a => ({ topic: "crypto_prices_chainlink", type: "update", filters: JSON.stringify({ symbol: a.toLowerCase() + "/usd" }) })) }));
+      }, 6000);
       clearInterval(rtds.ping);
       rtds.ping = setInterval(() => {
         if (ws.readyState !== 1) return;
@@ -517,8 +538,11 @@ window.BlueEdgeData = (() => {
       if (d?.topic !== "crypto_prices_chainlink" || !d.payload) return;
       const sym = String(d.payload.symbol || "").toLowerCase(), asset = sym.split("/")[0].toUpperCase();
       if (!asset) return;
-      const items = Array.isArray(d.payload.data) ? d.payload.data : [d.payload];
-      for (const it of items) { const p = Number(it.value), t = Number(it.timestamp) || Date.now(); if (p > 0) addTick(asset, t, p); }
+      const items = (Array.isArray(d.payload.data) ? d.payload.data : [d.payload])
+        .map(it => { let t = Number(it.timestamp ?? it.ts ?? d.timestamp); if (t && t < 1e12) t *= 1000; return { t: t || Date.now(), p: Number(it.value ?? it.price) }; })
+        .filter(x => x.p > 0).sort((a, b) => a.t - b.t);
+      rtds.got = true;
+      for (const x of items) addTick(asset, x.t, x.p);
       if (state.status.chainlink !== "live") { state.status.chainlink = "live"; emit("status"); }
       emitSoon("spot", 400);
     };
@@ -531,16 +555,16 @@ window.BlueEdgeData = (() => {
   }
   // first Chainlink tick at or just after time t (the value Polymarket snapshots)
   function chainlinkAt(asset, t, maxLagMs = 6000) {
-    const arr = ticks[asset]; if (!arr || !arr.length || arr[0].t > t) return null;
+    const arr = ticks[asset]; if (!arr || !arr.length || arr[0].t >= t) return null;
     for (const k of arr) if (k.t >= t) return k.t - t <= maxLagMs ? k.p : null;
     return null;
   }
 
   /* ---------- official window prices from polymarket.com (best effort; disabled if the browser blocks it) ---------- */
-  const official = {}; let officialFails = 0;
+  const official = {}; let officialFails = 0, officialPauseUntil = 0;
   const VARIANT = { 5: "fiveminute", 15: "fifteen", 60: "hourly" };
   async function fetchOfficial(m) {
-    if (officialFails >= 3) return official[m.id] || null;
+    if (Date.now() < officialPauseUntil) return official[m.id] || null;
     const o = official[m.id] || (official[m.id] = {});
     if (o.done || Date.now() - (o.at || 0) < 20000) return o;
     o.at = Date.now();
@@ -552,7 +576,7 @@ window.BlueEdgeData = (() => {
       if (Number(j.openPrice) > 0) o.open = Number(j.openPrice);
       if (j.closePrice != null && Number(j.closePrice) > 0) o.close = Number(j.closePrice);
       if (j.completed && o.close) o.done = true;
-    } catch { officialFails++; }
+    } catch { if (++officialFails >= 3) { officialFails = 0; officialPauseUntil = Date.now() + 10 * 60000; } }
     return o;
   }
 
@@ -587,16 +611,42 @@ window.BlueEdgeData = (() => {
       }
     } catch {}
   }
-  const usesBinance = m => /binance/.test(m.resolutionSource || "");
+  // 1 hour markets settle on the Binance BTC/USDT-style 1h candle; 5m/15m on Chainlink
+  const usesBinance = m => m.tf === 60 || /binance/.test(m.resolutionSource || "");
+  const binOpen = {}, binOpenAt = {};
+  const GLOBAL_BINANCE = ["https://data-api.binance.vision", "https://api.binance.com", "https://api-gcp.binance.com"];
+  async function fetchBinanceOpen(m) {
+    const key = `${m.asset}:${m.tf}:${m.start}`;
+    if (binOpen[key] != null || Date.now() - (binOpenAt[key] || 0) < 20000) return;
+    binOpenAt[key] = Date.now();
+    const interval = { 5: "5m", 15: "15m", 60: "1h" }[m.tf];
+    for (const host of GLOBAL_BINANCE) {
+      try {
+        const r = await fetch(`${host}/api/v3/klines?symbol=${m.asset}USDT&interval=${interval}&startTime=${m.start}&limit=1`, { cache: "no-store" });
+        if (r.status === 400) return;
+        if (!r.ok) continue;
+        const k = (await r.json())[0];
+        if (k && k[0] === m.start) { binOpen[key] = +k[1]; emitSoon("spot", 100); }
+        return;
+      } catch {}
+    }
+  }
   function priceToBeat(m) {
-    if (m.start > Date.now()) return { price: null, source: "", pending: true };
+    const now = Date.now();
+    if (m.start > now) return { price: null, source: "", pending: true, note: "Set when the window opens" };
     const o = official[m.id];
-    if (o?.open > 0) return { price: o.open, source: "Polymarket" };
-    const bin = state.opens[`${m.asset}:${m.tf}:${m.start}`];
-    if (usesBinance(m)) return bin != null ? { price: bin, source: "Binance" } : null;
-    const c = chainlinkAt(m.asset, m.start);
-    if (c != null) return { price: c, source: "Chainlink" };
-    return bin != null ? { price: bin, source: "Binance (est.)" } : null;
+    if (o?.open > 0) return { price: o.open, source: "Polymarket", exact: true };
+    if (usesBinance(m)) {
+      const key = `${m.asset}:${m.tf}:${m.start}`;
+      if (binOpen[key] != null) return { price: binOpen[key], source: "Binance 1h open", exact: true };
+      fetchBinanceOpen(m);
+      return { price: null, source: "", note: "Loading the Binance candle open…" };
+    }
+    const cap = captured[`${m.asset}:${m.start}`];
+    if (cap != null) return { price: cap, source: "Chainlink", exact: true };
+    if (now - m.start < 20000 && state.status.chainlink === "live") return { price: null, source: "", note: "Capturing the Chainlink open…" };
+    if (o === undefined || now - (o.at || 0) > 60000) fetchOfficial(m); // polymarket.com fallback, if the browser allows it
+    return { price: null, source: "", missing: true, note: "Not captured: BlueEdge wasn't connected when this window opened. The next window will have it." };
   }
   function livePrice(m) {
     const c = state.chainlink[m.asset], s = state.spot[m.asset];
@@ -650,11 +700,12 @@ window.BlueEdgeData = (() => {
     const o = await fetchOfficial(m);
     if (o?.done && o.open > 0 && o.close > 0) return setRes(m, o.close >= o.open ? "Up" : "Down", "Polymarket prices", true);
     if (now > m.end + estimateAfterMs) {
-      const open = priceToBeat(m)?.price;
-      let close = usesBinance(m) ? null : chainlinkAt(m.asset, m.end);
-      let src = "Chainlink";
-      if (close == null) { close = await binanceClose(m); src = "Binance"; }
-      if (open != null && close != null) return setRes(m, close >= open ? "Up" : "Down", `${src} (estimated)`, false);
+      const ptb = priceToBeat(m);
+      const clClose = usesBinance(m) ? null : chainlinkAt(m.asset, m.end);
+      if (ptb?.exact && ptb.source === "Chainlink" && clClose != null) return setRes(m, clClose >= ptb.price ? "Up" : "Down", "Chainlink (estimated)", false);
+      const bClose = await binanceClose(m), bOpen = state.opens[`${m.asset}:${m.tf}:${m.start}`];
+      if (usesBinance(m) && ptb?.price != null && bClose != null) return setRes(m, bClose >= ptb.price ? "Up" : "Down", "Binance (estimated)", false);
+      if (bOpen != null && bClose != null) return setRes(m, bClose >= bOpen ? "Up" : "Down", "Binance (estimated)", false);
     }
     return state.resolutions[m.id] || null;
   }

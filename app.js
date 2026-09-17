@@ -76,7 +76,7 @@
   function vm(m, now = Date.now()) {
     const ub = D.bookFor(m.upToken), db = D.bookFor(m.downToken);
     const ptb = D.priceToBeat(m), lp = D.livePrice(m);
-    const ctx = { now, up: { bid: ub.bid ?? null, ask: ub.ask ?? null }, down: { bid: db.bid ?? null, ask: db.ask ?? null }, open: ptb?.price ?? null, openSource: ptb?.source || "", spot: lp?.price ?? null, spotSource: lp?.source || "" };
+    const ctx = { now, up: { bid: ub.bid ?? null, ask: ub.ask ?? null }, down: { bid: db.bid ?? null, ask: db.ask ?? null }, open: ptb?.price ?? null, openSource: ptb?.source || "", openNote: ptb?.note || "", spot: lp?.price ?? null, spotSource: lp?.source || "" };
     const um = mid(ctx.up), dm = mid(ctx.down);
     return {
       m, ctx, decision: S.evaluate(strategy, m, ctx), res: D.resolutionFor(m.id),
@@ -159,7 +159,7 @@
     set(field(el, "upAsk"), cents(v.ctx.up.ask));
     set(field(el, "downAsk"), cents(v.ctx.down.ask));
     field(el, "split").style.transform = `scaleX(${(v.upProb ?? 0.5).toFixed(4)})`;
-    set(field(el, "spot"), v.ctx.open != null ? `To beat ${fmtPrice(v.ctx.open)}` : v.m.start > now ? "To beat: set at open" : "Price to beat loading…");
+    set(field(el, "spot"), v.ctx.open != null ? `To beat ${fmtPrice(v.ctx.open)}` : v.m.start > now ? "To beat: set at open" : /Not captured/.test(v.ctx.openNote) ? "To beat: not captured" : "To beat: capturing…");
     const mv = field(el, "move");
     set(mv, v.ctx.spot == null ? "" : `${fmtPrice(v.ctx.spot)}${v.move == null ? "" : ` ${v.move >= 0 ? "▲" : "▼"}${(Math.abs(v.move) * 100).toFixed(3)}%`}`);
     mv.className = v.move == null ? "" : v.move >= 0 ? "gain" : "loss";
@@ -303,7 +303,7 @@
     set(f("upAsk"), cents(v.ctx.up.ask)); set(f("downAsk"), cents(v.ctx.down.ask));
     set(f("upBid"), `sell ${cents(v.ctx.up.bid)}`); set(f("downBid"), `sell ${cents(v.ctx.down.bid)}`);
     $$(".side", el).forEach(b => b.setAttribute("aria-checked", String(b.dataset.side === side)));
-    set(f("open"), v.ctx.open == null ? (m.start > now ? `Set when it opens in ${clock(m.start - now)}` : "Loading…") : `${fmtPrice(v.ctx.open)} ${v.ctx.openSource ? `(${v.ctx.openSource})` : ""}`);
+    set(f("open"), v.ctx.open == null ? (m.start > now ? `Set when it opens in ${clock(m.start - now)}` : (v.ctx.openNote || "Loading…")) : `${fmtPrice(v.ctx.open)} ${v.ctx.openSource ? `(${v.ctx.openSource})` : ""}`);
     set(f("spot"), v.ctx.spot == null ? "—" : `${fmtPrice(v.ctx.spot)} ${v.ctx.spotSource ? `(${v.ctx.spotSource})` : ""}`);
     const mv = f("move"); set(mv, v.move == null ? "—" : `${v.move >= 0 ? "+" : "−"}$${Math.abs(v.ctx.spot - v.ctx.open).toFixed(v.ctx.open >= 100 ? 2 : v.ctx.open >= 1 ? 4 : 5)} ${v.move >= 0 ? "above" : "below"} (${(Math.abs(v.move) * 100).toFixed(3)}%)`);
     set(f("liq"), m.liquidity ? "$" + Math.round(m.liquidity).toLocaleString() : "—");
