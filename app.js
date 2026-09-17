@@ -1071,7 +1071,12 @@
     switch (action) {
       case "refresh":
         if (Date.now() - D.state.status.lastDiscovery < 10000) toast("Markets were refreshed a moment ago.", "info");
-        else { D.discover(); toast("Checking Polymarket for markets…", "info"); }
+        else {
+          D.resetBackoff();                     // clear any stuck proxy/rate-limit backoff so this actually retries now
+          D.refreshPriceToBeat();
+          D.discover();
+          toast("Checking Polymarket for markets and price-to-beat…", "info");
+        }
         return;
       case "live-refresh": L.refresh(false); toast("Refreshing your live account…", "info"); return;
       case "close-sheet": return closeSheet();

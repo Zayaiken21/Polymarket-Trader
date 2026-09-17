@@ -74,6 +74,25 @@ window.BlueEdgeData = (() => {
     return p;
   }
 
+  // Separate serial queue for price-to-beat lookups (crypto-price API + its two CORS relays). This is a
+  // DIFFERENT service from Gamma with its own external limits, and — critically — it used to share the queue
+  // above. With several 5m/15m windows open across several assets, price-to-beat traffic could dwarf the
+  // handful of requests Gamma discovery/order-book refresh actually need, so real Gamma calls sat queued
+  // behind price-to-beat retries and market discovery looked like it was "disconnecting". Isolating it here
+  // means the two can never starve each other, no matter how many short-timeframe windows are open at once.
+  const ptbLimiter = { last: 0, gapMs: 180, chain: Promise.resolve() };
+  function ptbSchedule(task) {
+    const run = async () => {
+      const wait = ptbLimiter.gapMs - (Date.now() - ptbLimiter.last);
+      if (wait > 0) await sleep(wait);
+      ptbLimiter.last = Date.now();
+      return task();
+    };
+    const p = ptbLimiter.chain.then(run, run);
+    ptbLimiter.chain = p.catch(() => {});
+    return p;
+  }
+
   const cache = new Map();
   async function gamma(path, ttlMs = 0, base = GAMMA) {
     const url = base + path;
@@ -621,7 +640,7 @@ window.BlueEdgeData = (() => {
     // actually matters (Polymarket typically publishes within seconds of T0; once a window is well underway
     // there's no rush). 5m/15m get a tighter cadence than 1h, which has minutes of slack either way.
     const early = now - m.start < 90000;
-    const gap = m.tf <= 15 ? (early ? 2500 : 8000) : (early ? 4000 : 20000);
+    const gap = m.tf <= 15 ? (early ? 3000 : 8000) : (early ? 4000 : 20000);
     if (now - (o.at || 0) < gap || o.busy) return o;
     o.at = now; o.busy = true;
     const routes = [...PTB_ROUTES].sort((a, b) => (a.name === workingRoute ? -1 : b.name === workingRoute ? 1 : 0)).filter(r => now >= (routeDownUntil[r.name] || 0));
@@ -632,44 +651,51 @@ window.BlueEdgeData = (() => {
       // guess before Polymarket's real number arrives, and requiring agreement with it was throwing away
       // genuinely correct official answers whenever our own guess was even slightly off.
       const sane = v => v > 0 && live && Math.abs(v - live) / live < 0.08;
-      // Fire every eligible route (direct + both CORS relays) at once instead of one after another. They
-      // still pass through the shared, backoff-aware queue below (max 25 req/10s, ~150ms apart), so this
-      // never adds extra load — it just means we're not sitting through one proxy's full round trip before
-      // even asking the next one, which is what made 5m/15m windows visibly lag behind 1h.
-      const attempts = (routes.length ? routes : PTB_ROUTES).map(r => schedule(() => {
-        const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), 6000);
-        return fetch(routeUrl(r, m), { cache: "no-store", signal: ctrl.signal }).finally(() => clearTimeout(timer));
-      }).then(async res => {
-        if (res.status === 404 && r.kind === "equity") { routeDownUntil[r.name] = Date.now() + 30 * 60000; throw new Error("no equity route"); }
-        if (!res.ok) throw new Error(String(res.status));
-        const a = readAnswer(r, await res.json());
-        if (!live) throw new Error("nothing to verify against yet");        // can't sanity-check: don't trust it this round
-        if (a.open != null && !sane(a.open)) throw new Error("not a real price for this coin");
-        return { r, a };
-      }).catch(e => {
-        routeDownUntil[r.name] = Date.now() + (workingRoute === r.name ? 20000 : 3 * 60000);
-        if (workingRoute === r.name) workingRoute = null;
-        throw e;
-      }));
-      // First success wins — we don't sit through the slowest route once a faster one has already answered.
-      const firstSuccess = list => new Promise((resolve, reject) => {
-        let left = list.length, lastErr;
-        list.forEach(p => p.then(resolve, e => { lastErr = e; if (--left === 0) reject(lastErr); }));
-      });
-      try {
-        const { r, a } = await firstSuccess(attempts);
-        workingRoute = r.name;
-        if (state.status.ptb !== "live") { state.status.ptb = "live"; emit("status"); }
-        if (a.open != null) o.open = a.open;
-        if (a.close != null) o.close = a.close;
-        if (a.completed && o.open && o.close) o.done = true;
-        emitSoon("spot", 100);
-      } catch {
-        if (!live) o.at = Date.now() - (gap - 1500);                        // retry almost immediately once we have a live price
-        else if (!workingRoute && state.status.ptb !== "error") { state.status.ptb = "error"; emit("status"); }
+      // One route at a time, cheapest (last-known-working) first, through the isolated PTB queue above.
+      // Only escalate to the next relay if the current one actually fails — asking all three at once for
+      // every one of a dozen simultaneous 5m/15m windows was what overloaded the two free CORS relays and
+      // made them unreliable in the first place.
+      for (const r of (routes.length ? routes : PTB_ROUTES)) {
+        try {
+          const res = await ptbSchedule(() => {
+            const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), 5000);
+            return fetch(routeUrl(r, m), { cache: "no-store", signal: ctrl.signal }).finally(() => clearTimeout(timer));
+          });
+          if (res.status === 429) { routeDownUntil[r.name] = Date.now() + 45000; continue; }
+          if (res.status === 404 && r.kind === "equity") { routeDownUntil[r.name] = Date.now() + 30 * 60000; continue; }
+          if (!res.ok) throw new Error(String(res.status));
+          const a = readAnswer(r, await res.json());
+          if (!live) { o.at = Date.now() - (gap - 1500); return o; }         // nothing to sanity-check against yet: try again shortly
+          if (a.open != null && !sane(a.open)) continue;                    // not a real price for this coin: ignore this answer, try next route
+          workingRoute = r.name;
+          if (state.status.ptb !== "live") { state.status.ptb = "live"; emit("status"); }
+          if (a.open != null) o.open = a.open;
+          if (a.close != null) o.close = a.close;
+          if (a.completed && o.open && o.close) o.done = true;
+          if (a.open != null || m.start > now - 90000) { emitSoon("spot", 100); return o; }
+        } catch {
+          routeDownUntil[r.name] = Date.now() + (workingRoute === r.name ? 20000 : 3 * 60000);
+          if (workingRoute === r.name) workingRoute = null;
+        }
       }
+      if (!workingRoute && state.status.ptb !== "error") { state.status.ptb = "error"; emit("status"); }
     } finally { o.busy = false; }
     return o;
+  }
+
+  // Manual "refresh" escape hatch: clears every backoff timer this file tracks so a stuck connection
+  // (a proxy that's been marked down, a market whose price-to-beat is quietly waiting out its poll gap,
+  // Gamma's own 429 backoff) gets retried immediately instead of waiting out its normal cooldown.
+  function resetBackoff() {
+    for (const k of Object.keys(routeDownUntil)) delete routeDownUntil[k];
+    for (const k of Object.keys(binHostDownUntil)) delete binHostDownUntil[k];
+    limiter.pauseUntil = 0; limiter.strikes = 0;
+    ptbAt = 0;
+    const now = Date.now();
+    for (const m of state.markets.values()) {
+      const o = official[m.id];
+      if (o && !o.done) o.at = 0;
+    }
   }
 
   state.ptbCheck = { checked: 0, matched: 0, worst: 0, seen: {} };
@@ -693,11 +719,14 @@ window.BlueEdgeData = (() => {
     if (n.metaClose) { o.close = n.metaClose; if (o.open) o.done = true; }
     emitSoon("spot", 300);
   }
-  // One batched Gamma request (every 12s at most) for live windows still missing Polymarket's price to beat
+  // One batched Gamma request (every 8s at most) for live windows still missing Polymarket's price to beat.
+  // This is a completely separate, CORS-safe channel from the scraped crypto-price endpoint above (real
+  // gamma-api.polymarket.com, the same one market discovery already uses successfully) and one call here
+  // covers up to 20 markets at once, so tightening it costs almost nothing against the 25-req/10s budget.
   let ptbAt = 0;
   async function refreshPriceToBeat() {
     const now = Date.now();
-    if (now - ptbAt < 12000) return;
+    if (now - ptbAt < 8000) return;
     const need = [...state.markets.values()].filter(m => m.start <= now - 3000 && m.end > now - 30 * 60000 && !(official[m.id]?.gamma && official[m.id]?.close));
     if (!need.length) return;
     ptbAt = now;
@@ -918,6 +947,6 @@ window.BlueEdgeData = (() => {
   return {
     state, on, discover, startLoop, setDiscoveryInterval: setInterval_, fetchResolutions, priceToBeat, livePrice, resolve,
     resolutionFor: id => state.resolutions[id] || null,
-    bookFor, openFor, spotFor, markets, watch, TIMEFRAMES
+    bookFor, openFor, spotFor, markets, watch, TIMEFRAMES, resetBackoff, refreshPriceToBeat
   };
 })();
