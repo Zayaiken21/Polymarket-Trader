@@ -708,23 +708,75 @@ window.BlueEdgeData = (() => {
       }
     } catch {}
   }
-  const usesBinance = m => m.tf === 60 || /binance/.test(m.resolutionSource || "");
+  // Every crypto Up/Down market (5m, 15m and 1h alike) trades against a Binance*USDT pair whose kline grid
+  // lines up exactly with Polymarket's window boundaries, so the same Binance-kline approach that used to be
+  // reserved for 1h markets is the right source for all three timeframes — it's just a matter of asking for
+  // it. Polymarket's own published price (Gamma eventMetadata, or the scraped crypto-price endpoint) still
+  // wins whenever it's available; this is the fast, always-on fallback/cross-check underneath it.
+  const usesBinance = () => true;
+
+  // Dedicated queue for Binance REST calls, separate from the Polymarket limiter above (different service,
+  // different limits). Klines with limit=1 are weight-1 requests, so this stays generous, but a shared gap +
+  // small per-window backoff keeps many simultaneous 5m/15m windows across several assets from bursting all
+  // at once and tripping Binance's 429/418 responses.
+  const binLimiter = { chain: Promise.resolve(), last: 0, gapMs: 120, pauseUntil: 0 };
+  function binSchedule(task) {
+    const run = async () => {
+      for (;;) {
+        const now = Date.now();
+        const wait = now < binLimiter.pauseUntil ? binLimiter.pauseUntil - now
+          : now - binLimiter.last < binLimiter.gapMs ? binLimiter.gapMs - (now - binLimiter.last) : 0;
+        if (wait <= 0) break;
+        await sleep(wait);
+      }
+      binLimiter.last = Date.now();
+      return task();
+    };
+    const p = binLimiter.chain.then(run, run);
+    binLimiter.chain = p.catch(() => {});
+    return p;
+  }
+
+  const BINANCE_REST_HOSTS = ["https://data-api.binance.vision", "https://api.binance.com", "https://api-gcp.binance.com", "https://api.binance.us"];
+  let binWorkingHost = null;
+  const binHostDownUntil = {};
+  // One shared kline fetcher (used for both the opening candle and, once it has closed, the final candle) so
+  // the exact same host-fallback / backoff / "remember what worked" behaviour applies to every timeframe.
+  async function binanceKline(asset, tf, startTime) {
+    const interval = { 5: "5m", 15: "15m", 60: "1h" }[tf];
+    const now = Date.now();
+    const hosts = BINANCE_REST_HOSTS
+      .filter(h => now >= (binHostDownUntil[h] || 0))
+      .sort((a, b) => (a === binWorkingHost ? -1 : b === binWorkingHost ? 1 : 0));
+    for (const host of hosts.length ? hosts : BINANCE_REST_HOSTS) {
+      try {
+        const k = await binSchedule(async () => {
+          const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), 6000);
+          try {
+            const r = await fetch(`${host}/api/v3/klines?symbol=${asset}USDT&interval=${interval}&startTime=${startTime}&limit=1`, { cache: "no-store", signal: ctrl.signal });
+            if (r.status === 429 || r.status === 418) { binHostDownUntil[host] = Date.now() + 60000; throw new Error("rate limited"); }
+            if (r.status === 400) return "skip";                          // bad symbol/interval for this pair — no point retrying other hosts
+            if (!r.ok) throw new Error(String(r.status));
+            return (await r.json())[0] || null;
+          } finally { clearTimeout(timer); }
+        });
+        if (k === "skip") return null;
+        binWorkingHost = host;
+        return k || null;
+      } catch {
+        if (binWorkingHost === host) binWorkingHost = null;
+        if (!binHostDownUntil[host] || binHostDownUntil[host] < now) binHostDownUntil[host] = Date.now() + 15000;
+      }
+    }
+    return null;
+  }
   const binOpen = {}, binOpenAt = {};
   async function fetchBinanceOpen(m) {
     const key = `${m.asset}:${m.tf}:${m.start}`;
     if (binOpen[key] != null || Date.now() - (binOpenAt[key] || 0) < 20000) return;
     binOpenAt[key] = Date.now();
-    const interval = { 5: "5m", 15: "15m", 60: "1h" }[m.tf];
-    for (const host of ["https://data-api.binance.vision", "https://api.binance.com", "https://api-gcp.binance.com"]) {
-      try {
-        const r = await fetch(`${host}/api/v3/klines?symbol=${m.asset}USDT&interval=${interval}&startTime=${m.start}&limit=1`, { cache: "no-store" });
-        if (r.status === 400) return;
-        if (!r.ok) continue;
-        const k = (await r.json())[0];
-        if (k && k[0] === m.start) { binOpen[key] = +k[1]; emitSoon("spot", 100); }
-        return;
-      } catch {}
-    }
+    const k = await binanceKline(m.asset, m.tf, m.start);
+    if (k && k[0] === m.start) { binOpen[key] = +k[1]; emitSoon("spot", 100); }
   }
   function priceToBeat(m) {
     const now = Date.now();
@@ -732,17 +784,15 @@ window.BlueEdgeData = (() => {
     const o = official[m.id];
     if (o?.open > 0) return { price: o.open, source: "Polymarket", exact: true };
     fetchOfficial(m);
-    if (usesBinance(m)) {
-      const key = `${m.asset}:${m.tf}:${m.start}`;
-      if (binOpen[key] == null) fetchBinanceOpen(m);
-      return binOpen[key] != null ? { price: binOpen[key], source: "Binance 1h open", exact: true } : { price: null, source: "", syncing: true };
-    }
-    const cap = captured[`${m.asset}:${m.tf}:${m.start}`];
+    const key = `${m.asset}:${m.tf}:${m.start}`;
+    if (binOpen[key] == null) fetchBinanceOpen(m);
+    if (binOpen[key] != null) return { price: binOpen[key], source: "Binance open", exact: true };
+    // Binance's own answer for this window hasn't landed yet (or Polymarket's page/proxy route is down) —
+    // show the best number available in the meantime instead of a bare "Syncing…": a Chainlink price
+    // captured right at the window boundary is exact once we have it, and failing that a same-window TWAP
+    // is a reasonable live estimate. Neither is ever used to feed a trade entry (that requires `exact`).
+    const cap = captured[key];
     if (cap != null) return { price: cap, source: "Chainlink at open", exact: true };
-    // No official price yet and we never captured one at the exact boundary (e.g. the page loaded, or
-    // Chainlink reconnected, mid-window). If tick history already covers the window's open, compute the
-    // same TWAP Polymarket uses on demand so the UI has a current number instead of "Syncing…" for the
-    // rest of the window. This is intentionally NOT `exact` — it never feeds a trade entry, only display.
     const lookback = LOOKBACK_MS[m.tf];
     const est = lookback ? twapBefore(m.asset, m.start, lookback) : null;
     return est != null
@@ -759,19 +809,11 @@ window.BlueEdgeData = (() => {
 
   /* ---------- resolutions: official first, never stuck ---------- */
   const resolveTries = new Map();
-  const TF_INTERVAL = { 5: "5m", 15: "15m", 60: "1h" };
   async function binanceClose(m) {
     const key = `${m.asset}:${m.tf}:${m.start}`;
     if (state.closes[key] != null) return state.closes[key];
-    for (const host of ["https://data-api.binance.vision", "https://api.binance.com", "https://api.binance.us"]) {
-      try {
-        const r = await fetch(`${host}/api/v3/klines?symbol=${m.asset}USDT&interval=${TF_INTERVAL[m.tf]}&startTime=${m.start}&limit=1`, { cache: "no-store" });
-        if (!r.ok) continue;
-        const k = (await r.json())[0];
-        if (k && k[0] === m.start && Date.now() > k[6]) { state.opens[key] = +k[1]; state.closes[key] = +k[4]; return +k[4]; }
-        return null;
-      } catch {}
-    }
+    const k = await binanceKline(m.asset, m.tf, m.start);
+    if (k && k[0] === m.start && Date.now() > k[6]) { state.opens[key] = +k[1]; state.closes[key] = +k[4]; return +k[4]; }
     return null;
   }
   const setRes = (m, winner, source, officialFlag) => {
@@ -805,7 +847,7 @@ window.BlueEdgeData = (() => {
     if (!known && now > m.end + estimateAfterMs) {
       const ptb = priceToBeat(m);
       if (ptb?.exact && ptb.source === "Chainlink at open") { const c = twapBefore(m.asset, m.end, LOOKBACK_MS[m.tf] || 30000); if (c != null) return setRes(m, c >= ptb.price ? "Up" : "Down", "Chainlink TWAP estimate", false); }
-      if (ptb?.exact && usesBinance(m)) { const c = await binanceClose(m); if (c != null) return setRes(m, c >= ptb.price ? "Up" : "Down", "Binance 1h candle", false); }
+      if (ptb?.exact && usesBinance(m)) { const c = await binanceClose(m); if (c != null) return setRes(m, c >= ptb.price ? "Up" : "Down", "Binance candle", false); }
       if (!ptb?.exact) { const c = await binanceClose(m), b = state.opens[`${m.asset}:${m.tf}:${m.start}`]; if (b != null && c != null) return setRes(m, c >= b ? "Up" : "Down", "Binance candle", false); }
     }
     return state.resolutions[m.id] || null;
