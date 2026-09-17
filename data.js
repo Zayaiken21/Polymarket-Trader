@@ -617,48 +617,57 @@ window.BlueEdgeData = (() => {
     const o = official[m.id] || (official[m.id] = {});
     const now = Date.now();
     if (o.done || (o.open && m.end > now && !force)) return o;             // the price to beat never changes once set
-    // right after T0 ask every 4s (Polymarket publishes with a short delay), otherwise every 20s
-    const gap = now - m.start < 90000 ? 4000 : 20000;
+    // Short windows can't afford to wait out a slow proxy: ask more often, and only for as long as it
+    // actually matters (Polymarket typically publishes within seconds of T0; once a window is well underway
+    // there's no rush). 5m/15m get a tighter cadence than 1h, which has minutes of slack either way.
+    const early = now - m.start < 90000;
+    const gap = m.tf <= 15 ? (early ? 2500 : 8000) : (early ? 4000 : 20000);
     if (now - (o.at || 0) < gap || o.busy) return o;
     o.at = now; o.busy = true;
     const routes = [...PTB_ROUTES].sort((a, b) => (a.name === workingRoute ? -1 : b.name === workingRoute ? 1 : 0)).filter(r => now >= (routeDownUntil[r.name] || 0));
     try {
-      for (const r of routes) {
-        try {
-          // Goes through the same shared, backoff-aware queue as Gamma discovery (max 25 req/10s, ~150ms
-          // apart) instead of a raw fetch(). The old code also serialized every market's price-to-beat
-          // request behind a single 350ms-wide global gate that reset on every attempt (successful or not),
-          // so with several 5m/15m windows open at once only the first one iterated each tick ever got a
-          // real network request — the rest were silently dropped and retried a tick later, which is why
-          // short-timeframe markets could sit on "Syncing with Polymarket" far longer than 1-hour markets.
-          const res = await schedule(() => {
-            const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), 6000);
-            return fetch(routeUrl(r, m), { cache: "no-store", signal: ctrl.signal }).finally(() => clearTimeout(timer));
-          });
-          if (res.status === 404 && r.kind === "equity") { routeDownUntil[r.name] = Date.now() + 30 * 60000; continue; }
-          if (!res.ok) throw new Error(res.status);
-          const a = readAnswer(r, await res.json());
-          const live = state.chainlink[m.asset]?.price ?? state.spot[m.asset]?.price;
-          if (!live) { o.at = Date.now() - 2000; return o; }              // can't verify yet: ask again in a moment
-          // Only guard against garbage (wrong asset, proxy error page, etc.) with a wide band against the live
-          // price. Do NOT require it to match our own local Chainlink capture: that capture is just our best
-          // guess before Polymarket's real number arrives, and requiring agreement with it was throwing away
-          // genuinely correct official answers whenever our own guess was even slightly off (the reason 5m/15m
-          // markets were stuck showing "Chainlink at open" instead of Polymarket's real value).
-          const sane = v => v > 0 && Math.abs(v - live) / live < 0.08;
-          if (a.open != null && !sane(a.open)) continue;                  // not a real price for this coin: ignore this answer
-          if (workingRoute !== r.name) { workingRoute = r.name; }
-          if (state.status.ptb !== "live") { state.status.ptb = "live"; emit("status"); }
-          if (a.open != null) o.open = a.open;
-          if (a.close != null) o.close = a.close;
-          if (a.completed && o.open && o.close) o.done = true;
-          if (a.open != null || m.start > now - 90000) { emitSoon("spot", 100); return o; } // got it, or it's just not published yet
-        } catch {
-          routeDownUntil[r.name] = Date.now() + (workingRoute === r.name ? 20000 : 3 * 60000);
-          if (workingRoute === r.name) workingRoute = null;
-        }
+      const live = state.chainlink[m.asset]?.price ?? state.spot[m.asset]?.price;
+      // Only guard against garbage (wrong asset, proxy error page, etc.) with a wide band against the live
+      // price. Do NOT require it to match our own local Chainlink capture: that capture is just our best
+      // guess before Polymarket's real number arrives, and requiring agreement with it was throwing away
+      // genuinely correct official answers whenever our own guess was even slightly off.
+      const sane = v => v > 0 && live && Math.abs(v - live) / live < 0.08;
+      // Fire every eligible route (direct + both CORS relays) at once instead of one after another. They
+      // still pass through the shared, backoff-aware queue below (max 25 req/10s, ~150ms apart), so this
+      // never adds extra load — it just means we're not sitting through one proxy's full round trip before
+      // even asking the next one, which is what made 5m/15m windows visibly lag behind 1h.
+      const attempts = (routes.length ? routes : PTB_ROUTES).map(r => schedule(() => {
+        const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), 6000);
+        return fetch(routeUrl(r, m), { cache: "no-store", signal: ctrl.signal }).finally(() => clearTimeout(timer));
+      }).then(async res => {
+        if (res.status === 404 && r.kind === "equity") { routeDownUntil[r.name] = Date.now() + 30 * 60000; throw new Error("no equity route"); }
+        if (!res.ok) throw new Error(String(res.status));
+        const a = readAnswer(r, await res.json());
+        if (!live) throw new Error("nothing to verify against yet");        // can't sanity-check: don't trust it this round
+        if (a.open != null && !sane(a.open)) throw new Error("not a real price for this coin");
+        return { r, a };
+      }).catch(e => {
+        routeDownUntil[r.name] = Date.now() + (workingRoute === r.name ? 20000 : 3 * 60000);
+        if (workingRoute === r.name) workingRoute = null;
+        throw e;
+      }));
+      // First success wins — we don't sit through the slowest route once a faster one has already answered.
+      const firstSuccess = list => new Promise((resolve, reject) => {
+        let left = list.length, lastErr;
+        list.forEach(p => p.then(resolve, e => { lastErr = e; if (--left === 0) reject(lastErr); }));
+      });
+      try {
+        const { r, a } = await firstSuccess(attempts);
+        workingRoute = r.name;
+        if (state.status.ptb !== "live") { state.status.ptb = "live"; emit("status"); }
+        if (a.open != null) o.open = a.open;
+        if (a.close != null) o.close = a.close;
+        if (a.completed && o.open && o.close) o.done = true;
+        emitSoon("spot", 100);
+      } catch {
+        if (!live) o.at = Date.now() - (gap - 1500);                        // retry almost immediately once we have a live price
+        else if (!workingRoute && state.status.ptb !== "error") { state.status.ptb = "error"; emit("status"); }
       }
-      if (!workingRoute && state.status.ptb !== "error") { state.status.ptb = "error"; emit("status"); }
     } finally { o.busy = false; }
     return o;
   }
@@ -708,17 +717,11 @@ window.BlueEdgeData = (() => {
       }
     } catch {}
   }
-  // Every crypto Up/Down market (5m, 15m and 1h alike) trades against a Binance*USDT pair whose kline grid
-  // lines up exactly with Polymarket's window boundaries, so the same Binance-kline approach that used to be
-  // reserved for 1h markets is the right source for all three timeframes — it's just a matter of asking for
-  // it. Polymarket's own published price (Gamma eventMetadata, or the scraped crypto-price endpoint) still
-  // wins whenever it's available; this is the fast, always-on fallback/cross-check underneath it.
-  const usesBinance = () => true;
-
   // Dedicated queue for Binance REST calls, separate from the Polymarket limiter above (different service,
   // different limits). Klines with limit=1 are weight-1 requests, so this stays generous, but a shared gap +
-  // small per-window backoff keeps many simultaneous 5m/15m windows across several assets from bursting all
-  // at once and tripping Binance's 429/418 responses.
+  // small per-host backoff keeps several simultaneous 5m/15m/1h windows from bursting all at once and
+  // tripping Binance's 429/418 responses. Only used for the resolution-estimate fallback below, never for
+  // the "price to beat" field itself.
   const binLimiter = { chain: Promise.resolve(), last: 0, gapMs: 120, pauseUntil: 0 };
   function binSchedule(task) {
     const run = async () => {
@@ -770,34 +773,19 @@ window.BlueEdgeData = (() => {
     }
     return null;
   }
-  const binOpen = {}, binOpenAt = {};
-  async function fetchBinanceOpen(m) {
-    const key = `${m.asset}:${m.tf}:${m.start}`;
-    if (binOpen[key] != null || Date.now() - (binOpenAt[key] || 0) < 20000) return;
-    binOpenAt[key] = Date.now();
-    const k = await binanceKline(m.asset, m.tf, m.start);
-    if (k && k[0] === m.start) { binOpen[key] = +k[1]; emitSoon("spot", 100); }
-  }
+  // "Price to beat" is Polymarket's own published number for the window — nothing else. Binance and
+  // Chainlink stay available elsewhere (the live-price readout, and as a last-resort background guess for
+  // whether a window has already resolved), but they never stand in for this field: showing a Binance or
+  // Chainlink number here — even correctly labelled — reads as "the price to beat" to someone deciding
+  // whether to trade, which it isn't. Until Polymarket actually publishes it, this returns "syncing" and
+  // nothing else, while fetchOfficial keeps asking in the background at the cadence set above.
   function priceToBeat(m) {
     const now = Date.now();
     if (m.start > now) return { price: null, source: "", pending: true };
     const o = official[m.id];
     if (o?.open > 0) return { price: o.open, source: "Polymarket", exact: true };
     fetchOfficial(m);
-    const key = `${m.asset}:${m.tf}:${m.start}`;
-    if (binOpen[key] == null) fetchBinanceOpen(m);
-    if (binOpen[key] != null) return { price: binOpen[key], source: "Binance open", exact: true };
-    // Binance's own answer for this window hasn't landed yet (or Polymarket's page/proxy route is down) —
-    // show the best number available in the meantime instead of a bare "Syncing…": a Chainlink price
-    // captured right at the window boundary is exact once we have it, and failing that a same-window TWAP
-    // is a reasonable live estimate. Neither is ever used to feed a trade entry (that requires `exact`).
-    const cap = captured[key];
-    if (cap != null) return { price: cap, source: "Chainlink at open", exact: true };
-    const lookback = LOOKBACK_MS[m.tf];
-    const est = lookback ? twapBefore(m.asset, m.start, lookback) : null;
-    return est != null
-      ? { price: null, source: "", syncing: true, estPrice: est, estSource: "Chainlink TWAP (est.)" }
-      : { price: null, source: "", syncing: true };
+    return { price: null, source: "", syncing: true };
   }
   function livePrice(m) {
     const c = state.chainlink[m.asset], s = state.spot[m.asset];
@@ -845,10 +833,22 @@ window.BlueEdgeData = (() => {
     const o = await fetchOfficial(m, true);
     if (o?.done && o.open > 0 && o.close > 0) return setRes(m, o.close >= o.open ? "Up" : "Down", "Polymarket prices", true);
     if (!known && now > m.end + estimateAfterMs) {
+      // This is a background best-guess at who's ahead while we're still waiting on Polymarket's own
+      // settlement — always marked non-official (setRes's last argument) so nothing downstream mistakes it
+      // for a confirmed result, and it never touches the "price to beat" field itself.
       const ptb = priceToBeat(m);
-      if (ptb?.exact && ptb.source === "Chainlink at open") { const c = twapBefore(m.asset, m.end, LOOKBACK_MS[m.tf] || 30000); if (c != null) return setRes(m, c >= ptb.price ? "Up" : "Down", "Chainlink TWAP estimate", false); }
-      if (ptb?.exact && usesBinance(m)) { const c = await binanceClose(m); if (c != null) return setRes(m, c >= ptb.price ? "Up" : "Down", "Binance candle", false); }
-      if (!ptb?.exact) { const c = await binanceClose(m), b = state.opens[`${m.asset}:${m.tf}:${m.start}`]; if (b != null && c != null) return setRes(m, c >= b ? "Up" : "Down", "Binance candle", false); }
+      const key = `${m.asset}:${m.tf}:${m.start}`;
+      const cap = captured[key];
+      if (ptb?.exact) {
+        const c = await binanceClose(m);
+        if (c != null) return setRes(m, c >= ptb.price ? "Up" : "Down", "Binance candle estimate", false);
+      } else if (cap != null) {
+        const c = twapBefore(m.asset, m.end, LOOKBACK_MS[m.tf] || 30000);
+        if (c != null) return setRes(m, c >= cap ? "Up" : "Down", "Chainlink TWAP estimate", false);
+      } else {
+        const c = await binanceClose(m), b = state.opens[key];
+        if (b != null && c != null) return setRes(m, c >= b ? "Up" : "Down", "Binance candle estimate", false);
+      }
     }
     return state.resolutions[m.id] || null;
   }
