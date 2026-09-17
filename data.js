@@ -602,7 +602,7 @@ window.BlueEdgeData = (() => {
     { name: "relay-1", proxy: "codetabs", kind: "crypto" },
     { name: "relay-2", proxy: "allorigins", kind: "crypto" }
   ];
-  const routeDownUntil = {}; let workingRoute = null, officialLast = 0;
+  const routeDownUntil = {}; let workingRoute = null;
   state.status.ptb = "connecting";
   function routeUrl(r, m) {
     if (r.kind === "equity") return via(r.proxy, `https://polymarket.com/api/equity/price-to-beat/${encodeURIComponent(m.slug)}`);
@@ -619,14 +619,22 @@ window.BlueEdgeData = (() => {
     if (o.done || (o.open && m.end > now && !force)) return o;             // the price to beat never changes once set
     // right after T0 ask every 4s (Polymarket publishes with a short delay), otherwise every 20s
     const gap = now - m.start < 90000 ? 4000 : 20000;
-    if (now - (o.at || 0) < gap || now - officialLast < 350 || o.busy) return o;
-    o.at = now; officialLast = now; o.busy = true;
+    if (now - (o.at || 0) < gap || o.busy) return o;
+    o.at = now; o.busy = true;
     const routes = [...PTB_ROUTES].sort((a, b) => (a.name === workingRoute ? -1 : b.name === workingRoute ? 1 : 0)).filter(r => now >= (routeDownUntil[r.name] || 0));
     try {
       for (const r of routes) {
         try {
-          const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), 6000);
-          const res = await fetch(routeUrl(r, m), { cache: "no-store", signal: ctrl.signal }).finally(() => clearTimeout(timer));
+          // Goes through the same shared, backoff-aware queue as Gamma discovery (max 25 req/10s, ~150ms
+          // apart) instead of a raw fetch(). The old code also serialized every market's price-to-beat
+          // request behind a single 350ms-wide global gate that reset on every attempt (successful or not),
+          // so with several 5m/15m windows open at once only the first one iterated each tick ever got a
+          // real network request — the rest were silently dropped and retried a tick later, which is why
+          // short-timeframe markets could sit on "Syncing with Polymarket" far longer than 1-hour markets.
+          const res = await schedule(() => {
+            const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), 6000);
+            return fetch(routeUrl(r, m), { cache: "no-store", signal: ctrl.signal }).finally(() => clearTimeout(timer));
+          });
           if (res.status === 404 && r.kind === "equity") { routeDownUntil[r.name] = Date.now() + 30 * 60000; continue; }
           if (!res.ok) throw new Error(res.status);
           const a = readAnswer(r, await res.json());
@@ -665,9 +673,10 @@ window.BlueEdgeData = (() => {
       if (cap != null && !state.ptbCheck.seen[n.id] && n.tf !== 60) {
         state.ptbCheck.seen[n.id] = true; state.ptbCheck.checked++;
         const diff = Math.abs(cap - n.metaOpen);
-        if (diff <= Math.max(1e-9, n.metaOpen * 1e-7)) state.ptbCheck.matched++;
+        const tol = Math.max(0.01, n.metaOpen * 1e-4); // within 1 cent or 0.01%, whichever is larger — a real mismatch, not float/timing noise
+        if (diff <= tol) state.ptbCheck.matched++;
         state.ptbCheck.worst = Math.max(state.ptbCheck.worst, diff);
-        if (diff > n.metaOpen * 1e-7) { captured[`${n.asset}:${n.tf}:${n.start}`] = n.metaOpen; saveCaptured(); }   // Polymarket's value wins
+        if (diff > tol) { captured[`${n.asset}:${n.tf}:${n.start}`] = n.metaOpen; saveCaptured(); }   // Polymarket's value wins
         emit("status");
       }
     }
@@ -730,7 +739,15 @@ window.BlueEdgeData = (() => {
     }
     const cap = captured[`${m.asset}:${m.tf}:${m.start}`];
     if (cap != null) return { price: cap, source: "Chainlink at open", exact: true };
-    return { price: null, source: "", syncing: true };
+    // No official price yet and we never captured one at the exact boundary (e.g. the page loaded, or
+    // Chainlink reconnected, mid-window). If tick history already covers the window's open, compute the
+    // same TWAP Polymarket uses on demand so the UI has a current number instead of "Syncing…" for the
+    // rest of the window. This is intentionally NOT `exact` — it never feeds a trade entry, only display.
+    const lookback = LOOKBACK_MS[m.tf];
+    const est = lookback ? twapBefore(m.asset, m.start, lookback) : null;
+    return est != null
+      ? { price: null, source: "", syncing: true, estPrice: est, estSource: "Chainlink TWAP (est.)" }
+      : { price: null, source: "", syncing: true };
   }
   function livePrice(m) {
     const c = state.chainlink[m.asset], s = state.spot[m.asset];
@@ -785,7 +802,7 @@ window.BlueEdgeData = (() => {
     }
     const o = await fetchOfficial(m, true);
     if (o?.done && o.open > 0 && o.close > 0) return setRes(m, o.close >= o.open ? "Up" : "Down", "Polymarket prices", true);
-    if (now > m.end + estimateAfterMs) {
+    if (!known && now > m.end + estimateAfterMs) {
       const ptb = priceToBeat(m);
       if (ptb?.exact && ptb.source === "Chainlink at open") { const c = twapBefore(m.asset, m.end, LOOKBACK_MS[m.tf] || 30000); if (c != null) return setRes(m, c >= ptb.price ? "Up" : "Down", "Chainlink TWAP estimate", false); }
       if (ptb?.exact && usesBinance(m)) { const c = await binanceClose(m); if (c != null) return setRes(m, c >= ptb.price ? "Up" : "Down", "Binance 1h candle", false); }

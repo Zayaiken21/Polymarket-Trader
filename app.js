@@ -24,7 +24,8 @@
   let strategy = S.load();
   let botOn = read(K.bot, false) === true;
   let mode = read(K.mode, "paper") === "live" ? "live" : "paper";
-  const ui = { homeTf: "all", marketsTf: "all", marketsWhen: "live", chartCoin: "BTC", chartInterval: "15m", chartMarket: null, ...read(K.ui, {}) };
+  const IV_TO_TF = { "1m": 5, "3m": 5, "5m": 5, "15m": 15, "30m": 60, "1h": 60, "2h": 60, "4h": 60, "6h": 60, "8h": 60, "12h": 60, "1d": 60, "3d": 60, "1w": 60, "1M": 60 };
+  const ui = { homeTf: "all", marketsTf: "all", marketsWhen: "live", chartCoin: "BTC", chartInterval: "15m", chartPtbTf: 15, chartMarket: null, ...read(K.ui, {}) };
   let botNote = "", view = "home", liveBusy = false;
   const offered = new Set();
 
@@ -77,7 +78,7 @@
   function vm(m, now = Date.now()) {
     const ub = D.bookFor(m.upToken), db = D.bookFor(m.downToken);
     const ptb = D.priceToBeat(m), lp = D.livePrice(m);
-    const ctx = { now, up: { bid: ub.bid ?? null, ask: ub.ask ?? null }, down: { bid: db.bid ?? null, ask: db.ask ?? null }, open: ptb?.exact ? ptb.price : null, shownOpen: ptb?.exact ? ptb.price : null, openExact: !!ptb?.exact, openSource: ptb?.source || "", spot: lp?.price ?? null, spotSource: lp?.source || "" };
+    const ctx = { now, up: { bid: ub.bid ?? null, ask: ub.ask ?? null }, down: { bid: db.bid ?? null, ask: db.ask ?? null }, open: ptb?.exact ? ptb.price : null, shownOpen: ptb?.exact ? ptb.price : (ptb?.estPrice ?? null), openExact: !!ptb?.exact, openSource: ptb?.exact ? (ptb.source || "") : (ptb?.estSource || ""), spot: lp?.price ?? null, spotSource: lp?.source || "" };
     const um = mid(ctx.up), dm = mid(ctx.down);
     return {
       m, ctx, decision: S.evaluate(strategy, m, ctx), res: D.resolutionFor(m.id),
@@ -736,7 +737,7 @@
     return el;
   }
   function updateChartRow(el, v) {
-    set(field(el, "sub"), v.ctx.open != null ? `To beat ${fmtPrice(v.ctx.open)}${v.move != null ? `, ${v.move >= 0 ? "+" : "−"}${(Math.abs(v.move) * 100).toFixed(3)}%` : ""}` : "To beat —");
+    set(field(el, "sub"), v.ctx.shownOpen != null ? `To beat ${fmtPrice(v.ctx.shownOpen)}${v.move != null ? `, ${v.move >= 0 ? "+" : "−"}${(Math.abs(v.move) * 100).toFixed(3)}%` : ""}` : "To beat —");
     set(field(el, "odds"), `Up ${cents(v.ctx.up.ask)} / Down ${cents(v.ctx.down.ask)}`);
     set(field(el, "left"), `${clock(v.left)} left`);
     el.classList.toggle("selected", (Number(ui.chartPtbTf) || 5) === v.m.tf);
@@ -746,11 +747,13 @@
     const tf = Number(ui.chartPtbTf) || 5, now = Date.now();
     const m = D.markets().find(x => x.asset === ui.chartCoin && x.tf === tf && x.start <= now && x.end > now);
     const ptb = m ? D.priceToBeat(m) : null;
-    const key = m && ptb?.exact ? `${m.id}:${ptb.price}` : "";
+    const shown = ptb?.exact ? ptb.price : (ptb?.estPrice ?? null);
+    const isEst = !ptb?.exact && shown != null;
+    const key = m && shown != null ? `${m.id}:${shown}:${isEst ? "est" : "final"}` : "";
     if (key === chartLineKey) return;
     chartLineKey = key;
     if (!key) { C.clearPriceLine(); return; }
-    C.setPriceLine(ptb.price, `${tfShort(tf)} to beat`);
+    C.setPriceLine(shown, `${tfShort(tf)} to beat${isEst ? " (est.)" : ""}`, isEst);
   }
 
   /* positions */
@@ -1060,7 +1063,7 @@
       toast(`Removed ${acc.label}.`, "info"); return render();
     }
     if ((el = q("[data-coin]"))) { ui.chartCoin = el.dataset.coin; chartLineKey = ""; saveUi(); return draw(); }
-    if ((el = q("[data-interval]"))) { ui.chartInterval = el.dataset.interval; saveUi(); return draw(); }
+    if ((el = q("[data-interval]"))) { ui.chartInterval = el.dataset.interval; ui.chartPtbTf = IV_TO_TF[ui.chartInterval] || ui.chartPtbTf; chartLineKey = ""; saveUi(); return draw(); }
     if ((el = q("[data-open-sheet]"))) return openSheet(el.dataset.openSheet);
     if ((el = q("[data-chart-market]"))) { const mk = D.state.markets.get(el.dataset.chartMarket); if (mk) { ui.chartPtbTf = mk.tf; saveUi(); chartLineKey = ""; applyChartLine(); } return draw(); }
 

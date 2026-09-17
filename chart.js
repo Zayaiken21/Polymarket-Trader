@@ -215,10 +215,17 @@ window.BlueEdgeChart = (() => {
 
   /* ---- window-open price line for a Polymarket market ---- */
   function clearPriceLine() { if (priceLine && candles) { try { candles.removePriceLine(priceLine); } catch {} } priceLine = null; }
-  function setPriceLine(price, title) {
+  function setPriceLine(price, title, estimate) {
     clearPriceLine();
     if (!candles || price == null) return;
-    priceLine = candles.createPriceLine({ price, color: "#4DA3FF", lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: title || "Window open" });
+    priceLine = candles.createPriceLine({
+      price,
+      color: estimate ? "#4DA3FF99" : "#4DA3FF",
+      lineWidth: 1,
+      lineStyle: estimate ? 3 : 2, // 3 = LargeDashed for an estimate, 2 = Dashed for the confirmed price
+      axisLabelVisible: true,
+      title: title || "Window open"
+    });
   }
 
   function pause() { gen++; closeWs(); }

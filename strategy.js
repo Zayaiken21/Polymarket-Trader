@@ -153,6 +153,7 @@ window.BlueEdgeStrategy = (() => {
    *   entry + takeProfit, or exitMin.
    */
   function exitSignal(s, m, position, book, now = Date.now()) {
+    const R = RULES;
     if (!position || position.status && position.status !== "open") return { ok: false, reason: "No open position" };
     const bid = Number(book?.bid);
     const entry = Number(position.entry);
