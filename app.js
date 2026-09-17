@@ -159,14 +159,14 @@
     set(field(el, "upAsk"), cents(v.ctx.up.ask));
     set(field(el, "downAsk"), cents(v.ctx.down.ask));
     field(el, "split").style.transform = `scaleX(${(v.upProb ?? 0.5).toFixed(4)})`;
-    set(field(el, "spot"), v.ctx.open != null ? `To beat ${v.ctx.openExact ? "" : "≈"}${fmtPrice(v.ctx.open)}${v.ctx.openExact ? "" : " est."}` : v.m.start > now ? "To beat: set at open" : "To beat: loading…");
+    set(field(el, "spot"), v.ctx.open != null ? `To beat ${fmtPrice(v.ctx.open)}` : v.m.start > now ? "To beat: set at open" : "To beat: loading from Polymarket…");
     const mv = field(el, "move");
     set(mv, v.ctx.spot == null ? "" : `${fmtPrice(v.ctx.spot)}${v.move == null ? "" : ` ${v.move >= 0 ? "▲" : "▼"}${(Math.abs(v.move) * 100).toFixed(3)}%`}`);
     mv.className = v.move == null ? "" : v.move >= 0 ? "gain" : "loss";
     const held = holdingFor(v.m);
     const st = field(el, "status");
     if (ended) {
-      set(st, v.res ? `Resolved ${v.res.winner}${v.res.official ? "" : " (estimated)"}${held ? `, you held ${held.side}` : ""}` : "Waiting for the official result…");
+      set(st, v.res ? `Resolved ${v.res.winner}${v.res.official ? "" : " (from price feed)"}${held ? `, you held ${held.side}` : ""}` : "Waiting for the official result…");
       st.className = "mc-status " + (v.res ? (v.res.winner === "Up" ? "res-up" : "res-down") : "wait");
     } else {
       set(st, held ? `You hold ${held.side}` : v.decision.reason);
@@ -247,7 +247,7 @@
       rows: [["Shares", t.shares.toFixed(2)], ["Entry price", cents(t.entry)], ["Cost", money(t.cost)], ["Fees", money((t.fee || 0) + (t.exitFee || 0))],
         ["Exit price", t.exit != null ? cents(t.exit) : t.status === "open" ? `now ${cents(bid)}` : "—"], ["P/L", t.pnl != null ? money(t.pnl, true) : "—", signClass(t.pnl)],
         ["Window", `${new Date(t.start).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} – ${new Date(t.end).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`],
-        ["Resolved", res ? `${res.winner}${res.official ? " (official)" : " (estimated)"}` : t.status === "open" ? "Not yet" : (t.note || "—")], ["Placed by", t.source === "bot" ? "Bot" : "You"]],
+        ["Resolved", res ? `${res.winner}${res.official ? " (official)" : " (from price feed)"}` : t.status === "open" ? "Not yet" : (t.note || "—")], ["Placed by", t.source === "bot" ? "Bot" : "You"]],
       url: t.url
     });
   }
@@ -298,12 +298,12 @@
     const tf = { hour: "numeric", minute: "2-digit" };
     set(f("window"), `${new Date(m.start).toLocaleTimeString([], tf)} – ${new Date(m.end).toLocaleTimeString([], tf)}`);
     set(f("left"), v.live ? clock(v.left) : m.start > now ? clock(m.start - now) : "0:00");
-    set(f("leftLabel"), v.live ? "left in this window" : m.start > now ? "until this window opens" : v.res ? `resolved ${v.res.winner}${v.res.official ? " (official)" : " (estimated)"}` : "closed, waiting for result");
+    set(f("leftLabel"), v.live ? "left in this window" : m.start > now ? "until this window opens" : v.res ? `resolved ${v.res.winner}${v.res.official ? " (official)" : " (from price feed)"}` : "closed, waiting for result");
     f("progress").style.transform = `scaleX(${v.progress.toFixed(4)})`;
     set(f("upAsk"), cents(v.ctx.up.ask)); set(f("downAsk"), cents(v.ctx.down.ask));
     set(f("upBid"), `sell ${cents(v.ctx.up.bid)}`); set(f("downBid"), `sell ${cents(v.ctx.down.bid)}`);
     $$(".side", el).forEach(b => b.setAttribute("aria-checked", String(b.dataset.side === side)));
-    set(f("open"), v.ctx.open == null ? (m.start > now ? `Set when it opens in ${clock(m.start - now)}` : (v.ctx.openNote || "Loading…")) : `${fmtPrice(v.ctx.open)} ${v.ctx.openSource ? `(${v.ctx.openSource})` : ""}`);
+    set(f("open"), v.ctx.open == null ? (m.start > now ? `Set when it opens in ${clock(m.start - now)}` : (v.ctx.openNote || "Loading Polymarket's price to beat…")) : `${fmtPrice(v.ctx.open)} ${v.ctx.openSource ? `(${v.ctx.openSource})` : ""}`);
     set(f("spot"), v.ctx.spot == null ? "—" : `${fmtPrice(v.ctx.spot)} ${v.ctx.spotSource ? `(${v.ctx.spotSource})` : ""}`);
     const mv = f("move"); set(mv, v.move == null ? "—" : `${v.move >= 0 ? "+" : "−"}$${Math.abs(v.ctx.spot - v.ctx.open).toFixed(v.ctx.open >= 100 ? 2 : v.ctx.open >= 1 ? 4 : 5)} ${v.move >= 0 ? "above" : "below"} (${(Math.abs(v.move) * 100).toFixed(3)}%)`);
     set(f("liq"), m.liquidity ? "$" + Math.round(m.liquidity).toLocaleString() : "—");
@@ -402,9 +402,9 @@
           continue;
         }
         const won = r.winner === t.side, payout = won ? t.shares : 0;
-        Object.assign(t, { status: won ? "won" : "lost", exit: won ? 1 : 0, closedAt: Date.now(), pnl: payout - t.cost - t.fee, note: `Resolved ${r.winner}${r.official ? "" : " (est.)"}`, official: r.official });
+        Object.assign(t, { status: won ? "won" : "lost", exit: won ? 1 : 0, closedAt: Date.now(), pnl: payout - t.cost - t.fee, note: `Resolved ${r.winner}${r.official ? "" : " (price feed)"}`, official: r.official });
         account.cash += payout; changed++;
-        toast(`${t.asset} ${tfShort(t.tf)} resolved ${r.winner}${r.official ? "" : " (estimated)"}. Paper ${won ? "win" : "loss"}: ${money(t.pnl, true)}.`, won ? "good" : "bad");
+        toast(`${t.asset} ${tfShort(t.tf)} resolved ${r.winner}${r.official ? "" : " (from price feed)"}. Paper ${won ? "win" : "loss"}: ${money(t.pnl, true)}.`, won ? "good" : "bad");
       }
       if (changed) { saveAccount(); saveTrades(); watchOpen(); render(); }
     } catch (e) { console.warn("Settlement check failed:", e.message); }

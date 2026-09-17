@@ -673,22 +673,21 @@ window.BlueEdgeData = (() => {
   }
   function priceToBeat(m) {
     const now = Date.now();
-    if (m.start > now) return { price: null, source: "", pending: true, note: "Set when the window opens" };
+    if (m.start > now) return { price: null, source: "", pending: true, note: "Set by Polymarket when the window opens" };
     const o = official[m.id];
     if (o?.open > 0) return { price: o.open, source: "Polymarket", exact: true };
     fetchOfficial(m);
-    const key = `${m.asset}:${m.tf}:${m.start}`;
     if (usesBinance(m)) {
+      const key = `${m.asset}:${m.tf}:${m.start}`;
       if (binOpen[key] != null) return { price: binOpen[key], source: "Binance 1h open", exact: true };
       fetchBinanceOpen(m);
-      return { price: null, source: "", note: "Loading Polymarket's price to beat…" };
+    } else {
+      const cap = captured[`${m.asset}:${m.start}`];
+      if (cap != null) return { price: cap, source: "Chainlink", exact: true };
     }
-    const cap = captured[`${m.asset}:${m.start}`];
-    if (cap != null) return { price: cap, source: "Chainlink", exact: true };
-    const est = binOpen[key] ?? state.opens[key] ?? null;
-    if (est == null) fetchBinanceOpen(m);
-    return { price: est, source: est != null ? "Binance estimate" : "", estimate: true,
-      note: now - m.start < 20000 ? "Loading Polymarket's price to beat…" : "Estimate only. The bot waits for Polymarket's exact price to beat." };
+    const blocked = state.status.ptbApi === "blocked";
+    return { price: null, source: "", exact: false, blocked,
+      note: blocked ? "Waiting for Polymarket's price to beat. Add the price-to-beat relay in Settings to load it right away." : "Loading Polymarket's price to beat…" };
   }
   function livePrice(m) {
     const c = state.chainlink[m.asset], s = state.spot[m.asset];
@@ -744,10 +743,8 @@ window.BlueEdgeData = (() => {
     if (now > m.end + estimateAfterMs) {
       const ptb = priceToBeat(m);
       const clClose = usesBinance(m) ? null : chainlinkAt(m.asset, m.end);
-      if (ptb?.exact && ptb.source === "Chainlink" && clClose != null) return setRes(m, clClose >= ptb.price ? "Up" : "Down", "Chainlink (estimated)", false);
-      const bClose = await binanceClose(m), bOpen = state.opens[`${m.asset}:${m.tf}:${m.start}`];
-      if (usesBinance(m) && ptb?.price != null && bClose != null) return setRes(m, bClose >= ptb.price ? "Up" : "Down", "Binance (estimated)", false);
-      if (bOpen != null && bClose != null) return setRes(m, bClose >= bOpen ? "Up" : "Down", "Binance (estimated)", false);
+      if (ptb?.exact && ptb.source === "Chainlink" && clClose != null) return setRes(m, clClose >= ptb.price ? "Up" : "Down", "Chainlink", false);
+      if (usesBinance(m) && ptb?.exact) { const bClose = await binanceClose(m); if (bClose != null) return setRes(m, bClose >= ptb.price ? "Up" : "Down", "Binance 1h candle", false); }
     }
     return state.resolutions[m.id] || null;
   }
