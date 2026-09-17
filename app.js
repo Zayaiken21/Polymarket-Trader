@@ -48,8 +48,7 @@
   const tfShort = tf => (tf === 60 ? "1h" : `${tf}m`);
   const coinName = a => NAMES[a] || a;
   const coinColor = a => COLORS[a] || "#4DA3FF";
-  // same precision Polymarket shows: 2 decimals from $100, 4 from $1, 6 below $1 (e.g. DOGE $0.080589)
-  const fmtPrice = p => p == null ? "—" : p >= 1000 ? "$" + p.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : p >= 1 ? "$" + p.toFixed(p >= 100 ? 2 : 4) : "$" + p.toFixed(6);
+  const fmtPrice = p => p == null ? "—" : p >= 1000 ? "$" + p.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : p >= 1 ? "$" + p.toFixed(p >= 100 ? 2 : 4) : "$" + p.toFixed(5);
   const set = (el, text) => { if (el && el.textContent !== text) el.textContent = text; };
   const html = (el, h) => { if (el && el._html !== h) { el.innerHTML = h; el._html = h; } };
   const signClass = n => (n > 0.004 ? "gain" : n < -0.004 ? "loss" : "");
@@ -77,12 +76,22 @@
   function vm(m, now = Date.now()) {
     const ub = D.bookFor(m.upToken), db = D.bookFor(m.downToken);
     const ptb = D.priceToBeat(m), lp = D.livePrice(m);
-    const ctx = { now, up: { bid: ub.bid ?? null, ask: ub.ask ?? null }, down: { bid: db.bid ?? null, ask: db.ask ?? null }, open: ptb?.exact ? ptb.price : null, shownOpen: ptb?.exact ? ptb.price : null, openExact: !!ptb?.exact, openSource: ptb?.source || "", spot: lp?.price ?? null, spotSource: lp?.source || "" };
+    const ctx = {
+      now,
+      up: { bid: ub.bid ?? null, ask: ub.ask ?? null },
+      down: { bid: db.bid ?? null, ask: db.ask ?? null },
+      open: ptb?.price ?? null,
+      openSource: ptb?.source || "",
+      openExact: ptb?.exact === true,
+      openNote: ptb?.pending ? "Waiting for Polymarket's exact price to beat" : "",
+      spot: lp?.price ?? null,
+      spotSource: lp?.source || ""
+    };
     const um = mid(ctx.up), dm = mid(ctx.down);
     return {
       m, ctx, decision: S.evaluate(strategy, m, ctx), res: D.resolutionFor(m.id),
       upProb: um != null ? um : dm != null ? 1 - dm : null,
-      move: ctx.shownOpen != null && ctx.spot != null ? (ctx.spot - ctx.shownOpen) / ctx.shownOpen : null,
+      move: ctx.open != null && ctx.spot != null ? (ctx.spot - ctx.open) / ctx.open : null,
       live: m.start <= now && m.end > now, left: m.end - now,
       progress: Math.min(1, Math.max(0, (now - m.start) / (m.end - m.start)))
     };
@@ -160,7 +169,7 @@
     set(field(el, "upAsk"), cents(v.ctx.up.ask));
     set(field(el, "downAsk"), cents(v.ctx.down.ask));
     field(el, "split").style.transform = `scaleX(${(v.upProb ?? 0.5).toFixed(4)})`;
-    set(field(el, "spot"), v.ctx.shownOpen != null ? `To beat ${fmtPrice(v.ctx.shownOpen)}` : v.m.start > now ? "To beat: at open" : "To beat —");
+    set(field(el, "spot"), v.ctx.open != null ? `To beat ${fmtPrice(v.ctx.open)}` : v.m.start > now ? "To beat: set at open" : "Price to beat loading…");
     const mv = field(el, "move");
     set(mv, v.ctx.spot == null ? "" : `${fmtPrice(v.ctx.spot)}${v.move == null ? "" : ` ${v.move >= 0 ? "▲" : "▼"}${(Math.abs(v.move) * 100).toFixed(3)}%`}`);
     mv.className = v.move == null ? "" : v.move >= 0 ? "gain" : "loss";
@@ -170,7 +179,7 @@
       set(st, v.res ? `Resolved ${v.res.winner}${v.res.official ? "" : " (estimated)"}${held ? `, you held ${held.side}` : ""}` : "Waiting for the official result…");
       st.className = "mc-status " + (v.res ? (v.res.winner === "Up" ? "res-up" : "res-down") : "wait");
     } else {
-      set(st, held ? `You hold ${held.side}` : v.decision.reason === "Waiting for the price to beat" ? "Syncing Polymarket's price to beat" : v.decision.reason);
+      set(st, held ? `You hold ${held.side}` : v.decision.reason);
       st.className = "mc-status " + (held ? "held" : v.decision.ok ? "ready" : /are off/.test(v.decision.reason) ? "off" : "wait");
     }
     el.classList.toggle("is-ready", v.decision.ok && !held);
@@ -304,9 +313,9 @@
     set(f("upAsk"), cents(v.ctx.up.ask)); set(f("downAsk"), cents(v.ctx.down.ask));
     set(f("upBid"), `sell ${cents(v.ctx.up.bid)}`); set(f("downBid"), `sell ${cents(v.ctx.down.bid)}`);
     $$(".side", el).forEach(b => b.setAttribute("aria-checked", String(b.dataset.side === side)));
-    set(f("open"), v.ctx.shownOpen == null ? (m.start > now ? `Set when it opens in ${clock(m.start - now)}` : "Syncing with Polymarket") : `${fmtPrice(v.ctx.shownOpen)} (${v.ctx.openSource})`);
+    set(f("open"), v.ctx.open == null ? (m.start > now ? `Set when it opens in ${clock(m.start - now)}` : "Loading…") : `${fmtPrice(v.ctx.open)} ${v.ctx.openSource ? `(${v.ctx.openSource})` : ""}`);
     set(f("spot"), v.ctx.spot == null ? "—" : `${fmtPrice(v.ctx.spot)} ${v.ctx.spotSource ? `(${v.ctx.spotSource})` : ""}`);
-    const mv = f("move"); set(mv, v.move == null ? "—" : `${v.move >= 0 ? "+" : "−"}$${Math.abs(v.ctx.spot - v.ctx.shownOpen).toFixed(v.ctx.shownOpen >= 100 ? 2 : v.ctx.shownOpen >= 1 ? 4 : 5)} ${v.move >= 0 ? "above" : "below"} (${(Math.abs(v.move) * 100).toFixed(3)}%)`);
+    const mv = f("move"); set(mv, v.move == null ? "—" : `${v.move >= 0 ? "+" : "−"}$${Math.abs(v.ctx.spot - v.ctx.open).toFixed(v.ctx.open >= 100 ? 2 : v.ctx.open >= 1 ? 4 : 5)} ${v.move >= 0 ? "above" : "below"} (${(Math.abs(v.move) * 100).toFixed(3)}%)`);
     set(f("liq"), m.liquidity ? "$" + Math.round(m.liquidity).toLocaleString() : "—");
 
     const live = isLive();
@@ -432,16 +441,21 @@
       return { ok: false, msg: e.message };
     } finally { liveBusy = false; render(); }
   }
-  async function liveSell(token) {
+  async function liveSell(token, automatic = false, reason = "Scalp target reached") {
     const p = L.state.positions.find(x => String(x.assetId ?? x.tokenId) === token);
-    if (!p) return;
+    if (!p) return { ok: false, msg: "Position not found" };
     const bid = D.bookFor(token).bid ?? Number(p.currentPrice);
-    if (!(bid > 0)) return toast("No buyers for this position right now.", "bad");
-    if (!confirm(`Sell ${Number(p.currentSize).toFixed(2)} shares at market (not below ${cents(Math.max(0.01, bid - S.RULES.slippage))})?`)) return;
+    if (!(bid > 0)) return { ok: false, msg: "No executable buyers" };
+    if (!automatic && !confirm(`Sell ${Number(p.currentSize).toFixed(2)} shares at market (not below ${cents(Math.max(0.01, bid - S.RULES.slippage))})?`)) return { ok: false, msg: "Cancelled" };
     liveBusy = true; render();
-    try { await L.sell({ tokenId: token, shares: Number(p.currentSize), minPrice: bid - S.RULES.slippage }); toast("Live sell order placed.", "good"); }
-    catch (e) { toast(`Sell failed: ${e.message}`, "bad"); }
-    finally { liveBusy = false; render(); }
+    try {
+      await L.sell({ tokenId: token, shares: Number(p.currentSize), minPrice: bid - S.RULES.slippage });
+      toast(automatic ? `Scalp exit: ${reason} at ${cents(bid)}.` : "Live sell order placed.", "good");
+      return { ok: true };
+    } catch (e) {
+      if (!automatic) toast(`Sell failed: ${e.message}`, "bad");
+      return { ok: false, msg: e.message };
+    } finally { liveBusy = false; render(); }
   }
 
   const buy = (m, side, source = "manual") => (isLive() ? liveBuy(m, side, source) : paperBuy(m, side, source));
@@ -468,7 +482,30 @@
       if (!L.canTrade()) { botNote = L.isUnlocked() ? "Paused: this account is read-only (no signer private key)." : "Waiting: unlock your live account in Settings."; return; }
       if (liveBusy) return;
       const idx = tokenIndex();
-      const activePositions = L.state.positions.filter(p => { const hit = idx.get(String(p.assetId ?? p.tokenId)); return hit && hit.m.end > now; });
+      const activePositions = L.state.positions.filter(p => {
+        const hit = idx.get(String(p.assetId ?? p.tokenId));
+        return hit && hit.m.end > now;
+      });
+
+      // Scalping exit: sell when the executable Polymarket bid reaches the
+      // higher-odds target, before considering a new entry.
+      if (!liveBusy && activePositions.length) {
+        for (const p of activePositions) {
+          const hit = idx.get(String(p.assetId ?? p.tokenId));
+          if (!hit) continue;
+          const token = String(p.assetId ?? p.tokenId);
+          const sig = S.exitSignal(strategy, hit.m, {
+            ...p,
+            entry: Number(p.avgPrice ?? p.entry ?? 0),
+            status: "open"
+          }, D.bookFor(token), now);
+          if (sig.ok) {
+            await liveSell(token, true, sig.reason);
+            break;
+          }
+        }
+      }
+
       const tried = liveTried();
       // orders we just placed count too, because Polymarket can take a few seconds to show the new position
       const pending = Object.keys(tried).filter(id => { const mk = D.state.markets.get(id); return mk && mk.end > now; }).length;
@@ -482,6 +519,14 @@
       const r = await liveBuy(ready[0].m, ready[0].decision.side, "bot");
       botNote = r.ok ? `Placed a live order on ${ready[0].m.asset} ${tfShort(ready[0].m.tf)}.` : `Skipped ${ready[0].m.asset}: ${r.msg}`;
       return;
+    }
+
+    // Paper scalps use the same executable-bid exit rules as live scalps.
+    for (const t of openTrades()) {
+      const m = D.state.markets.get(t.marketId);
+      if (!m) continue;
+      const sig = S.exitSignal(strategy, m, t, D.bookFor(t.token), now);
+      if (sig.ok) paperSell(t.id, sig.reason);
     }
 
     const open = openTrades();
@@ -707,8 +752,7 @@
     html($("#chartCoins"), coins.map(c => `<button data-coin="${esc(c)}">${esc(c)}</button>`).join(""));
     $$("#chartCoins button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.coin === ui.chartCoin)));
     $$("#chartIntervals button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.interval === ui.chartInterval)));
-    if (C.symbol !== ui.chartCoin + "USDT" || C.interval !== ui.chartInterval) { chartLineKey = ""; C.load(ui.chartCoin, ui.chartInterval).then(() => { chartLineKey = ""; applyChartLine(); }); }
-    else applyChartLine();
+    if (C.symbol !== ui.chartCoin + "USDT" || C.interval !== ui.chartInterval) C.load(ui.chartCoin, ui.chartInterval).then(applyChartLine);
     set($("#chartMarketsTitle"), `${coinName(ui.chartCoin)} markets on Polymarket`);
     const now = Date.now();
     const list = liveMarkets(now).filter(m => m.asset === ui.chartCoin).sort((a, b) => a.tf - b.tf).map(m => vm(m, now));
@@ -722,21 +766,16 @@
     return el;
   }
   function updateChartRow(el, v) {
-    set(field(el, "sub"), v.ctx.open != null ? `To beat ${fmtPrice(v.ctx.open)}${v.move != null ? `, ${v.move >= 0 ? "+" : "−"}${(Math.abs(v.move) * 100).toFixed(3)}%` : ""}` : "To beat —");
+    set(field(el, "sub"), v.ctx.open != null ? `Open ${fmtPrice(v.ctx.open)}${v.move != null ? `, ${v.move >= 0 ? "+" : "−"}${(Math.abs(v.move) * 100).toFixed(3)}%` : ""}` : "Waiting for window open");
     set(field(el, "odds"), `Up ${cents(v.ctx.up.ask)} / Down ${cents(v.ctx.down.ask)}`);
     set(field(el, "left"), `${clock(v.left)} left`);
-    el.classList.toggle("selected", (Number(ui.chartPtbTf) || 5) === v.m.tf);
+    el.classList.toggle("selected", ui.chartMarket === v.m.id);
   }
-  let chartLineKey = "";
   function applyChartLine() {
-    const tf = Number(ui.chartPtbTf) || 5, now = Date.now();
-    const m = D.markets().find(x => x.asset === ui.chartCoin && x.tf === tf && x.start <= now && x.end > now);
-    const ptb = m ? D.priceToBeat(m) : null;
-    const key = m && ptb?.exact ? `${m.id}:${ptb.price}` : "";
-    if (key === chartLineKey) return;
-    chartLineKey = key;
-    if (!key) { C.clearPriceLine(); return; }
-    C.setPriceLine(ptb.price, `${tfShort(tf)} to beat`);
+    const m = ui.chartMarket && D.state.markets.get(ui.chartMarket);
+    if (!m || m.asset !== ui.chartCoin || m.end < Date.now()) { C.clearPriceLine(); return; }
+    const open = D.openFor(m);
+    if (open != null) C.setPriceLine(open, `${tfShort(m.tf)} open`);
   }
 
   /* positions */
@@ -863,7 +902,7 @@
       ${secretInput("relayerKey", "Relayer API key", "", "Lets BlueEdge set up trading approvals without gas.", p?.relayerKey)}
       ${textInput("relayerAddress", "Relayer address", "0x…", "", p?.relayerAddress)}
       <p class="form-section">Protect this account</p>
-      ${secretInput("passcode", "Passcode", "At least 8 characters", editing ? "Enter the current passcode or a new one." : "You'll type this to unlock the account.")}
+      ${secretInput("passcode", "Settings passcode", "At least 8 characters", editing ? "Use the single settings passcode for this account." : "This is the single passcode used to save/edit keys and unlock the account.")}
       ${secretInput("passcode2", "Confirm passcode", "", "")}
       <button class="btn primary big" type="submit">${editing ? "Save changes" : "Save account"}</button>
       <p class="hint">Saving works even when Polymarket can't be reached. Keys are encrypted and stay on this device.</p>
@@ -968,7 +1007,6 @@
       [s.gamma, "Polymarket markets", s.lastDiscovery ? `${s.gammaMsg}. Checked ${Math.round((now - s.lastDiscovery) / 1000)}s ago, ${perMin} request${perMin === 1 ? "" : "s"} in the last minute.` : s.gammaMsg || "Starting up"],
       [s.poly, "Polymarket order books", `${s.polyTokens} outcome prices streaming, with a REST refresh for any that go quiet.`],
       [s.chainlink, "Chainlink prices (price to beat)", "Polymarket's live oracle feed that 5 and 15 minute markets resolve on."],
-      [D.state.ptbCheck?.checked ? (D.state.ptbCheck.matched === D.state.ptbCheck.checked ? "live" : "error") : "connecting", "Price to beat check", D.state.ptbCheck?.checked ? `${D.state.ptbCheck.matched} of ${D.state.ptbCheck.checked} captured prices matched Polymarket's official price to beat.` : "Compares each captured price with Polymarket's official value once Polymarket publishes it."],
       [s.binance, "Binance feed", s.binanceHost ? `Using ${s.binanceHost}. Falls back to other Binance hosts automatically.` : "Starts once markets are found."],
       [L.isUnlocked() ? (L.canTrade() && L.state.stream !== "live" ? "connecting" : "live") : L.hasVault() ? "idle" : "offline", "Live account", L.isUnlocked() ? (L.canTrade() ? "L1 + L2 connected. Updates stream from Polymarket, with a backup refresh every 20 seconds." : "L2 read-only. Balance and orders refresh every 15 seconds.") : L.hasVault() ? "Saved and locked." : "Not connected."]
     ];
@@ -1011,8 +1049,6 @@
 
   document.addEventListener("click", async e => {
     const t = e.target, q = sel => t.closest(sel);
-    const ext = t.closest('a[href^="https://polymarket.com/"]');
-    if (ext) { e.preventDefault(); const w = window.open(ext.href, "_blank", "noopener"); if (!w) location.href = ext.href; return; }
     let el;
     if ((el = q("[data-copy]"))) return copy(el.dataset.copy);
     if ((el = q("[data-sell]"))) { e.stopPropagation(); return paperSell(el.dataset.sell); }
@@ -1043,10 +1079,10 @@
       if (!L.hasVault() && isLive()) { mode = "paper"; write(K.mode, mode); }
       toast(`Removed ${acc.label}.`, "info"); return render();
     }
-    if ((el = q("[data-coin]"))) { ui.chartCoin = el.dataset.coin; chartLineKey = ""; saveUi(); return draw(); }
+    if ((el = q("[data-coin]"))) { ui.chartCoin = el.dataset.coin; ui.chartMarket = null; saveUi(); return draw(); }
     if ((el = q("[data-interval]"))) { ui.chartInterval = el.dataset.interval; saveUi(); return draw(); }
     if ((el = q("[data-open-sheet]"))) return openSheet(el.dataset.openSheet);
-    if ((el = q("[data-chart-market]"))) { const mk = D.state.markets.get(el.dataset.chartMarket); if (mk) { ui.chartPtbTf = mk.tf; saveUi(); chartLineKey = ""; applyChartLine(); } return draw(); }
+    if ((el = q("[data-chart-market]"))) { ui.chartMarket = ui.chartMarket === el.dataset.chartMarket ? null : el.dataset.chartMarket; saveUi(); applyChartLine(); return draw(); }
 
     const action = q("[data-action]")?.dataset.action;
     switch (action) {
@@ -1067,7 +1103,7 @@
       case "sheet-chart": {
         if (!sheet) return;
         const m = D.state.markets.get(sheet.id);
-        ui.chartCoin = m.asset; ui.chartPtbTf = m.tf; chartLineKey = "";
+        ui.chartCoin = m.asset; ui.chartMarket = m.id;
         ui.chartInterval = { 5: "1m", 15: "1m", 60: "5m" }[m.tf] || ui.chartInterval;
         saveUi(); closeSheet(); location.hash = "#chart"; return;
       }
@@ -1239,7 +1275,7 @@
   ["gesturestart", "gesturechange"].forEach(ev => document.addEventListener(ev, e => { if (!e.target.closest?.(".chart-host")) e.preventDefault(); }, { passive: false }));
   document.addEventListener("touchmove", e => { if (e.touches.length > 1 && !e.target.closest?.(".chart-host")) e.preventDefault(); }, { passive: false });
   L.on(render);
-  C.onUpdate(() => applyChartLine());
+  C.onUpdate(() => { if (ui.chartMarket) applyChartLine(); });
 
   /* ---------- start ---------- */
   if (mode === "live" && !L.hasVault()) { mode = "paper"; write(K.mode, mode); }

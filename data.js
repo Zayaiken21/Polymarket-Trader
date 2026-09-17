@@ -286,8 +286,9 @@ window.BlueEdgeData = (() => {
       if (!rtds.ws || rtds.ws.readyState > 1) { if (!rtds.timer) connectRtds(); }
       refreshStaleBooks();
       refreshPriceToBeat();
-      for (const m of state.markets.values()) if (m.start <= now && m.end > now && !official[m.id]?.open && !official[m.id]?.busy) { fetchOfficial(m); }
       if (now % 5000 < 1000) resolverTick();
+      // make sure we hold a fresh window-open price for live markets that weren't open when the app loaded
+      for (const m of state.markets.values()) if (m.start <= now && m.end > now && !usesBinance(m) && chainlinkAt(m.asset, m.start) == null && !official[m.id]?.open && officialFails < 3 && now - (official[m.id]?.at || 0) > 60000) { fetchOfficial(m); break; }
     }, 1000);
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden && Date.now() - state.status.lastDiscovery > 15000) discover();
@@ -482,54 +483,26 @@ window.BlueEdgeData = (() => {
   /* ---------- Chainlink prices from Polymarket RTDS (what 5m/15m markets resolve on) ---------- */
   const RTDS_URL = "wss://ws-live-data.polymarket.com";
   const rtds = { ws: null, retry: 0, last: 0, timer: null, ping: null };
-  const ticks = {};      // asset -> [{t, p}] every tick, kept 75 minutes
-  const lastTick = {};   // asset -> newest {t, p}
-  const CAP_KEY = "blueedge.ptb.v1";
-  const captured = (() => { try { const c = JSON.parse(localStorage.getItem(CAP_KEY) || "{}"); const cut = Date.now() - 3 * 3600e3; for (const k in c) if (Number(k.split(":")[1]) < cut) delete c[k]; return c; } catch { return {}; } })();
-  let capSave = null;
-  const saveCaptured = () => { clearTimeout(capSave); capSave = setTimeout(() => { try { localStorage.setItem(CAP_KEY, JSON.stringify(captured)); } catch {} }, 500); };
-  let feedEpoch = 0;                         // bumps on every (re)connect: a capture may never span a reconnect
-  const pendingCap = {};                     // "BTC:boundary" -> { prevT, epoch }
-  function finalizeCapture(asset, boundary) {
-    const key = `${asset}:${boundary}`, pend = pendingCap[key];
-    delete pendingCap[key];
-    if (!pend || captured[key] != null || pend.epoch !== feedEpoch) return;
-    const arr = ticks[asset] || [];
-    let first = null;
-    for (const k of arr) if (k.t >= boundary && (!first || k.t < first.t)) first = k;   // earliest timestamp, even if it arrived out of order
-    if (!first || first.t - boundary > 60000) return;
-    captured[key] = first.p; saveCaptured(); emitSoon("spot", 50);
-  }
+  const ticks = {}; // asset -> [{t, p}] kept for 75 minutes, max one per second
   function addTick(asset, t, p) {
-    const prev = lastTick[asset];
     const arr = ticks[asset] || (ticks[asset] = []);
-    arr.push({ t, p });
-    if (arr.length > 1 && arr[arr.length - 2].t > t) arr.sort((a, b) => a.t - b.t);
+    const last = arr[arr.length - 1];
+    if (last && Math.floor(last.t / 1000) === Math.floor(t / 1000)) last.p = p, last.t = Math.max(last.t, t);
+    else if (!last || t > last.t) arr.push({ t, p });
+    else { arr.push({ t, p }); arr.sort((a, b) => a.t - b.t); }
     const cutoff = Date.now() - 75 * 60000;
     while (arr.length && arr[0].t < cutoff) arr.shift();
-    if (prev && t <= prev.t) return;
-    if (prev && prev.epoch === feedEpoch) {
-      const boundary = Math.floor(t / 300000) * 300000;
-      // we were connected before the open (last tick ≤ 60s earlier) and this is the first tick after it
-      if (prev.t < boundary && boundary - prev.t <= 60000 && captured[`${asset}:${boundary}`] == null && !pendingCap[`${asset}:${boundary}`]) {
-        pendingCap[`${asset}:${boundary}`] = { prevT: prev.t, epoch: feedEpoch };
-        setTimeout(() => finalizeCapture(asset, boundary), 1500);                    // let any out-of-order ticks land first
-      }
-    }
-    lastTick[asset] = { t, p, epoch: feedEpoch };
-    state.chainlink[asset] = { price: p, ts: t };
+    const newest = arr[arr.length - 1];
+    state.chainlink[asset] = { price: newest.p, ts: newest.t };
   }
   function connectRtds() {
     clearTimeout(rtds.timer); rtds.timer = null;
     if (rtds.ws && rtds.ws.readyState <= 1) return;
     let ws; try { ws = new WebSocket(RTDS_URL); } catch { return; }
-    rtds.ws = ws; rtds.last = Date.now(); rtds.got = false; state.status.chainlink = "connecting";
-    feedEpoch++;
+    rtds.ws = ws; rtds.last = Date.now(); state.status.chainlink = "connecting";
     ws.onopen = () => {
       rtds.retry = 0;
-      const sub = JSON.stringify({ action: "subscribe", subscriptions: [{ topic: "crypto_prices_chainlink", type: "update" }] });
-      ws.send(sub);
-      setTimeout(() => { if (rtds.ws === ws && ws.readyState === 1 && !rtds.got) ws.send(sub); }, 8000);
+      ws.send(JSON.stringify({ action: "subscribe", subscriptions: [{ topic: "crypto_prices_chainlink", type: "*", filters: "" }] }));
       clearInterval(rtds.ping);
       rtds.ping = setInterval(() => {
         if (ws.readyState !== 1) return;
@@ -544,17 +517,13 @@ window.BlueEdgeData = (() => {
       if (d?.topic !== "crypto_prices_chainlink" || !d.payload) return;
       const sym = String(d.payload.symbol || "").toLowerCase(), asset = sym.split("/")[0].toUpperCase();
       if (!asset) return;
-      const items = (Array.isArray(d.payload.data) ? d.payload.data : [d.payload])
-        .map(it => { let t = Number(it.timestamp ?? d.timestamp); if (t && t < 1e12) t *= 1000; return { t: t || Date.now(), p: Number(it.value ?? it.price) }; })
-        .filter(x => x.p > 0).sort((a, b) => a.t - b.t);
-      rtds.got = true;
-      for (const x of items) addTick(asset, x.t, x.p);
+      const items = Array.isArray(d.payload.data) ? d.payload.data : [d.payload];
+      for (const it of items) { const p = Number(it.value), t = Number(it.timestamp) || Date.now(); if (p > 0) addTick(asset, t, p); }
       if (state.status.chainlink !== "live") { state.status.chainlink = "live"; emit("status"); }
       emitSoon("spot", 400);
     };
     ws.onerror = () => {};
     ws.onclose = () => {
-      feedEpoch++;
       clearInterval(rtds.ping);
       state.status.chainlink = "reconnecting"; emit("status");
       rtds.timer = setTimeout(connectRtds, Math.min(30000, 1000 * 2 ** rtds.retry++));
@@ -562,191 +531,126 @@ window.BlueEdgeData = (() => {
   }
   // first Chainlink tick at or just after time t (the value Polymarket snapshots)
   function chainlinkAt(asset, t, maxLagMs = 6000) {
-    const arr = ticks[asset]; if (!arr || !arr.length || arr[0].t >= t) return null;
+    const arr = ticks[asset]; if (!arr || !arr.length || arr[0].t > t) return null;
     for (const k of arr) if (k.t >= t) return k.t - t <= maxLagMs ? k.p : null;
     return null;
   }
 
   /* ---------- official window prices from polymarket.com (best effort; disabled if the browser blocks it) ---------- */
-  const official = {};
+  const official = {}; let officialFails = 0;
   const VARIANT = { 5: "fiveminute", 15: "fifteen", 60: "hourly" };
-  const isoSec = ms => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
-  const PTB_API = "https://polymarket.com/api/crypto/crypto-price";
-  const via = (proxy, url) => proxy === "codetabs" ? `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(url)}` : proxy === "allorigins" ? `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}` : url;
-  // each route: where to ask and how to read the answer. The first one that works is remembered.
-  const PTB_ROUTES = [
-    { name: "polymarket", proxy: "", kind: "crypto" },
-    { name: "relay-1", proxy: "codetabs", kind: "crypto" },
-    { name: "relay-2", proxy: "allorigins", kind: "crypto" }
-  ];
-  const routeDownUntil = {}; let workingRoute = null, officialLast = 0;
-  state.status.ptb = "connecting";
-  function routeUrl(r, m) {
-    if (r.kind === "equity") return via(r.proxy, `https://polymarket.com/api/equity/price-to-beat/${encodeURIComponent(m.slug)}`);
-    const q = new URLSearchParams({ symbol: m.asset, eventStartTime: isoSec(m.start), variant: VARIANT[m.tf], endDate: isoSec(m.end) });
-    return via(r.proxy, `${PTB_API}?${q}`);
-  }
-  function readAnswer(r, j) {
-    if (r.kind === "equity") { const p = Number(j?.price ?? j?.priceToBeat); return { open: p > 0 ? p : null, close: null, completed: false }; }
-    return { open: Number(j?.openPrice) > 0 ? Number(j.openPrice) : null, close: j?.closePrice != null && Number(j.closePrice) > 0 ? Number(j.closePrice) : null, completed: !!j?.completed };
-  }
-  async function fetchOfficial(m, force = false) {
+
+  /*
+   * Polymarket's web crypto-price endpoint is the reference-price endpoint
+   * used by the Up/Down crypto market UI. It returns openPrice/closePrice.
+   * We treat this as the only exact PTB source; Binance is never labelled
+   * as the price-to-beat.
+   */
+  async function fetchOfficial(m) {
     const o = official[m.id] || (official[m.id] = {});
-    const now = Date.now();
-    if (o.done || (o.open && m.end > now && !force)) return o;             // the price to beat never changes once set
-    // right after T0 ask every 4s (Polymarket publishes with a short delay), otherwise every 20s
-    const gap = now - m.start < 90000 ? 4000 : 20000;
-    if (now - (o.at || 0) < gap || now - officialLast < 350 || o.busy) return o;
-    o.at = now; officialLast = now; o.busy = true;
-    const routes = [...PTB_ROUTES].sort((a, b) => (a.name === workingRoute ? -1 : b.name === workingRoute ? 1 : 0)).filter(r => now >= (routeDownUntil[r.name] || 0));
+    if (o.done || Date.now() - (o.at || 0) < 8000) return o;
+    o.at = Date.now();
     try {
-      for (const r of routes) {
-        try {
-          const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), 6000);
-          const res = await fetch(routeUrl(r, m), { cache: "no-store", signal: ctrl.signal }).finally(() => clearTimeout(timer));
-          if (res.status === 404 && r.kind === "equity") { routeDownUntil[r.name] = Date.now() + 30 * 60000; continue; }
-          if (!res.ok) throw new Error(res.status);
-          const a = readAnswer(r, await res.json());
-          const live = state.chainlink[m.asset]?.price ?? state.spot[m.asset]?.price;
-          if (!live) { o.at = Date.now() - 2000; return o; }              // can't verify yet: ask again in a moment
-          const cap = captured[`${m.asset}:${m.start}`];
-          const sane = v => v > 0 && Math.abs(v - live) / live < 0.08 && (cap == null || Math.abs(v - cap) / cap < 0.003);
-          if (a.open != null && !sane(a.open)) continue;                  // not a real price for this coin: ignore this answer
-          if (workingRoute !== r.name) { workingRoute = r.name; }
-          if (state.status.ptb !== "live") { state.status.ptb = "live"; emit("status"); }
-          if (a.open != null) o.open = a.open;
-          if (a.close != null) o.close = a.close;
-          if (a.completed && o.open && o.close) o.done = true;
-          if (a.open != null || m.start > now - 90000) { emitSoon("spot", 100); return o; } // got it, or it's just not published yet
-        } catch {
-          routeDownUntil[r.name] = Date.now() + (workingRoute === r.name ? 20000 : 3 * 60000);
-          if (workingRoute === r.name) workingRoute = null;
-        }
+      const q = new URLSearchParams({
+        symbol: m.asset,
+        eventStartTime: new Date(m.start).toISOString(),
+        variant: VARIANT[m.tf],
+        endDate: new Date(m.end).toISOString()
+      });
+      const r = await fetch(`https://polymarket.com/api/crypto/crypto-price?${q}`, {
+        cache: "no-store",
+        headers: { "Accept": "application/json" }
+      });
+      if (!r.ok) throw new Error(r.status);
+      const j = await r.json();
+      const open = Number(j.openPrice);
+      const close = Number(j.closePrice);
+      if (Number.isFinite(open) && open > 0) {
+        o.open = open;
+        o.src = "Polymarket";
+        o.exact = true;
       }
-      if (!workingRoute && state.status.ptb !== "error") { state.status.ptb = "error"; emit("status"); }
-    } finally { o.busy = false; }
+      if (Number.isFinite(close) && close > 0) o.close = close;
+      if (j.completed === true && o.close > 0) o.done = true;
+      officialFails = 0;
+    } catch { officialFails++; }
     return o;
   }
 
-  state.ptbCheck = { checked: 0, matched: 0, worst: 0, seen: {} };
   function applyMeta(n) {
     if (!n.metaOpen && !n.metaClose) return;
     const o = official[n.id] || (official[n.id] = {});
-    if (n.metaOpen) {
-      o.gamma = true;
-      const cap = captured[`${n.asset}:${n.start}`];
-      if (cap != null && !state.ptbCheck.seen[n.id] && n.tf !== 60) {
-        state.ptbCheck.seen[n.id] = true; state.ptbCheck.checked++;
-        const diff = Math.abs(cap - n.metaOpen);
-        if (diff <= Math.max(1e-9, n.metaOpen * 1e-7)) state.ptbCheck.matched++;
-        state.ptbCheck.worst = Math.max(state.ptbCheck.worst, diff);
-        if (diff > n.metaOpen * 1e-7) { captured[`${n.asset}:${n.start}`] = n.metaOpen; saveCaptured(); }   // Polymarket's value wins
-        emit("status");
-      }
-    }
-    if (n.metaOpen) { o.open = n.metaOpen; o.src = "Polymarket"; }
+    if (n.metaOpen) { o.open = n.metaOpen; o.src = "Polymarket"; o.exact = true; }
     if (n.metaClose) { o.close = n.metaClose; if (o.open) o.done = true; }
     emitSoon("spot", 300);
   }
-  // One batched Gamma request (every 12s at most) for live windows still missing Polymarket's price to beat
+
   let ptbAt = 0;
   async function refreshPriceToBeat() {
     const now = Date.now();
-    if (now - ptbAt < 12000) return;
-    const need = [...state.markets.values()].filter(m => m.start <= now - 3000 && m.end > now - 30 * 60000 && !(official[m.id]?.gamma && official[m.id]?.close));
+    if (now - ptbAt < 8000) return;
+    const need = [...state.markets.values()]
+      .filter(m => m.start <= now && m.end > now - 120000 && !official[m.id]?.open)
+      .sort((a, b) => b.start - a.start)
+      .slice(0, 20);
     if (!need.length) return;
     ptbAt = now;
-    const slugs = need.sort((a, b) => b.start - a.start).slice(0, 20).map(m => m.slug);
-    try {
-      const events = await gamma(`/events?${slugs.map(x => "slug=" + encodeURIComponent(x)).join("&")}&limit=${slugs.length}`);
-      const seen = new Set();
-      for (const ev of Array.isArray(events) ? events : []) for (const mk of ev.markets || []) {
-        const n = normalize(ev, mk); if (!n) continue;
-        seen.add(n.slug); applyMeta(n);
-        const cur = state.markets.get(n.id); if (cur) Object.assign(cur, { metaOpen: n.metaOpen ?? cur.metaOpen, metaClose: n.metaClose ?? cur.metaClose });
-      }
-      // if multi-slug isn't honoured, look up the two newest individually
-      if (!seen.size) for (const x of slugs.slice(0, 2)) {
-        const evs = await gamma(`/events?slug=${encodeURIComponent(x)}`);
-        for (const ev of Array.isArray(evs) ? evs : []) for (const mk of ev.markets || []) { const n = normalize(ev, mk); if (n) applyMeta(n); }
-      }
-    } catch {}
+    await Promise.allSettled(need.map(fetchOfficial));
+    emitSoon("spot", 100);
   }
-  const usesBinance = m => m.tf === 60 || /binance/.test(m.resolutionSource || "");
-  const binOpen = {}, binOpenAt = {};
-  async function fetchBinanceOpen(m) {
-    const key = `${m.asset}:${m.tf}:${m.start}`;
-    if (binOpen[key] != null || Date.now() - (binOpenAt[key] || 0) < 20000) return;
-    binOpenAt[key] = Date.now();
-    const interval = { 5: "5m", 15: "15m", 60: "1h" }[m.tf];
-    for (const host of ["https://data-api.binance.vision", "https://api.binance.com", "https://api-gcp.binance.com"]) {
-      try {
-        const r = await fetch(`${host}/api/v3/klines?symbol=${m.asset}USDT&interval=${interval}&startTime=${m.start}&limit=1`, { cache: "no-store" });
-        if (r.status === 400) return;
-        if (!r.ok) continue;
-        const k = (await r.json())[0];
-        if (k && k[0] === m.start) { binOpen[key] = +k[1]; emitSoon("spot", 100); }
-        return;
-      } catch {}
-    }
-  }
+
+  const usesBinance = m => /binance/.test(m.resolutionSource || "");
+
   function priceToBeat(m) {
-    const now = Date.now();
-    if (m.start > now) return { price: null, source: "", pending: true };
+    if (m.start > Date.now()) return { price: null, source: "", pending: true, exact: false };
     const o = official[m.id];
     if (o?.open > 0) return { price: o.open, source: "Polymarket", exact: true };
-    fetchOfficial(m);
-    if (usesBinance(m)) {
-      const key = `${m.asset}:${m.tf}:${m.start}`;
-      if (binOpen[key] == null) fetchBinanceOpen(m);
-      return binOpen[key] != null ? { price: binOpen[key], source: "Binance 1h open", exact: true } : { price: null, source: "", syncing: true };
-    }
-    const cap = captured[`${m.asset}:${m.start}`];
-    if (cap != null) return { price: cap, source: "Chainlink at open", exact: true };
-    return { price: null, source: "", syncing: true };
+    if (m.metaOpen > 0) return { price: m.metaOpen, source: "Polymarket", exact: true };
+    return { price: null, source: "Polymarket", exact: false, pending: true };
   }
+
   function livePrice(m) {
     const c = state.chainlink[m.asset], s = state.spot[m.asset];
     if (!usesBinance(m) && c && Date.now() - c.ts < 60000) return { price: c.price, source: "Chainlink", ts: c.ts };
     return s ? { price: s.price, source: "Binance", ts: s.ts } : null;
   }
 
-  /* ---------- resolutions: official first, never stuck ---------- */
+  /* ---------- resolutions: official Polymarket result only ---------- */
   const resolveTries = new Map();
-  const TF_INTERVAL = { 5: "5m", 15: "15m", 60: "1h" };
-  async function binanceClose(m) {
-    const key = `${m.asset}:${m.tf}:${m.start}`;
-    if (state.closes[key] != null) return state.closes[key];
-    for (const host of ["https://data-api.binance.vision", "https://api.binance.com", "https://api.binance.us"]) {
-      try {
-        const r = await fetch(`${host}/api/v3/klines?symbol=${m.asset}USDT&interval=${TF_INTERVAL[m.tf]}&startTime=${m.start}&limit=1`, { cache: "no-store" });
-        if (!r.ok) continue;
-        const k = (await r.json())[0];
-        if (k && k[0] === m.start && Date.now() > k[6]) { state.opens[key] = +k[1]; state.closes[key] = +k[4]; return +k[4]; }
-        return null;
-      } catch {}
-    }
-    return null;
-  }
   const setRes = (m, winner, source, officialFlag) => {
     const prev = state.resolutions[m.id];
     state.resolutions[m.id] = { winner, source, official: officialFlag, at: Date.now() };
     if (!prev || prev.official !== officialFlag || prev.winner !== winner) emit("resolution", m);
     return state.resolutions[m.id];
   };
-  // m: { id (conditionId), slug, asset, tf, start, end, upToken?, resolutionSource? }
-  async function resolve(m, { estimateAfterMs = 90000 } = {}) {
+
+  async function resolve(m) {
     const known = state.resolutions[m.id];
     if (known?.official) return known;
     const now = Date.now();
     if (now < m.end + 4000) return null;
     if (now - (resolveTries.get(m.id) || 0) < 10000) return known || null;
     resolveTries.set(m.id, now);
+
     try {
       const j = await gamma(`/markets/${m.id}`, 0, CLOB_REST);
-      const win = (j?.tokens || []).find(t => t.winner === true);
-      if (win) return setRes(m, (m.upToken ? String(win.token_id) === String(m.upToken) : /^(up|yes)$/i.test(win.outcome)) ? "Up" : "Down", "Polymarket", true);
+      const tokens = Array.isArray(j?.tokens) ? j.tokens : [];
+      const win = tokens.find(t => t.winner === true);
+      if (win) {
+        const isUp = m.upToken
+          ? String(win.token_id) === String(m.upToken)
+          : /^(up|yes)$/i.test(win.outcome);
+        return setRes(m, isUp ? "Up" : "Down", "Polymarket", true);
+      }
     } catch {}
+
+    try {
+      const o = await fetchOfficial(m);
+      if (o?.done && o.open > 0 && o.close > 0) {
+        return setRes(m, o.close >= o.open ? "Up" : "Down", "Polymarket crypto-price", true);
+      }
+    } catch {}
+
     if (m.slug) {
       try {
         const g = await fetchResolutions([m.slug]);
@@ -754,16 +658,9 @@ window.BlueEdgeData = (() => {
         if (w) return setRes(m, /^(up|yes)$/i.test(w) ? "Up" : "Down", "Polymarket", true);
       } catch {}
     }
-    const o = await fetchOfficial(m, true);
-    if (o?.done && o.open > 0 && o.close > 0) return setRes(m, o.close >= o.open ? "Up" : "Down", "Polymarket prices", true);
-    if (now > m.end + estimateAfterMs) {
-      const ptb = priceToBeat(m);
-      if (ptb?.exact && ptb.source === "Chainlink") { const c = chainlinkAt(m.asset, m.end); if (c != null) return setRes(m, c >= ptb.price ? "Up" : "Down", "Chainlink", false); }
-      if (ptb?.exact && usesBinance(m)) { const c = await binanceClose(m); if (c != null) return setRes(m, c >= ptb.price ? "Up" : "Down", "Binance 1h candle", false); }
-      if (!ptb?.exact) { const c = await binanceClose(m), b = state.opens[`${m.asset}:${m.tf}:${m.start}`]; if (b != null && c != null) return setRes(m, c >= b ? "Up" : "Down", "Binance candle", false); }
-    }
     return state.resolutions[m.id] || null;
   }
+
   // background: resolve ended markets we still track (a few per tick to stay light)
   let resolverBusy = false;
   async function resolverTick() {
@@ -793,7 +690,8 @@ window.BlueEdgeData = (() => {
         if (b.src === "ws" && now - b.ts <= 20000) continue;
         Object.assign(b, { bid: bids.length ? Math.max(...bids) : null, ask: asks.length ? Math.min(...asks) : null, ts: Date.now(), src: b.src === "ws" ? "ws" : "rest" });
       }
-      bookFails = 0; emitSoon("books", 200);
+      bookFails = 0;
+      emitSoon("books", 200);
     } catch { bookFails++; }
   }
 
