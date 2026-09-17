@@ -286,6 +286,7 @@ window.BlueEdgeData = (() => {
       if (!rtds.ws || rtds.ws.readyState > 1) { if (!rtds.timer) connectRtds(); }
       refreshStaleBooks();
       refreshPriceToBeat();
+      for (const m of state.markets.values()) if (m.start <= now && m.end > now && !official[m.id]?.open && !official[m.id]?.busy) { fetchOfficial(m); }
       if (now % 5000 < 1000) resolverTick();
     }, 1000);
     document.addEventListener("visibilitychange", () => {
@@ -494,7 +495,7 @@ window.BlueEdgeData = (() => {
     if (prev) {
       const boundary = Math.floor(t / 300000) * 300000;
       // exact: we saw a tick just before the boundary, so this one is the first at/after it
-      if (prev.t < boundary && boundary - prev.t <= 15000 && captured[`${asset}:${boundary}`] == null) { captured[`${asset}:${boundary}`] = p; saveCaptured(); emitSoon("spot", 100); }
+      if (prev.t < boundary && boundary - prev.t <= 15000 && t - boundary <= 5000 && captured[`${asset}:${boundary}`] == null) { captured[`${asset}:${boundary}`] = p; saveCaptured(); emitSoon("spot", 100); }
     }
     lastTick[asset] = { t, p };
     arr.push({ t, p });
@@ -549,25 +550,64 @@ window.BlueEdgeData = (() => {
   }
 
   /* ---------- official window prices from polymarket.com (best effort; disabled if the browser blocks it) ---------- */
-  const official = {}; let officialPauseUntil = 0, officialFails = 0, officialLast = 0;
+  const official = {};
   const VARIANT = { 5: "fiveminute", 15: "fifteen", 60: "hourly" };
   const isoSec = ms => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
+  const PTB_API = "https://polymarket.com/api/crypto/crypto-price";
+  const via = (proxy, url) => proxy === "codetabs" ? `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(url)}` : proxy === "allorigins" ? `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}` : url;
+  // each route: where to ask and how to read the answer. The first one that works is remembered.
+  const PTB_ROUTES = [
+    { name: "polymarket", proxy: "", kind: "crypto" },
+    { name: "polymarket-equity", proxy: "", kind: "equity" },
+    { name: "relay-1", proxy: "codetabs", kind: "crypto" },
+    { name: "relay-2", proxy: "allorigins", kind: "crypto" }
+  ];
+  const routeDownUntil = {}; let workingRoute = null, officialLast = 0;
+  state.status.ptb = "connecting";
+  function routeUrl(r, m) {
+    if (r.kind === "equity") return via(r.proxy, `https://polymarket.com/api/equity/price-to-beat/${encodeURIComponent(m.slug)}`);
+    const q = new URLSearchParams({ symbol: m.asset, eventStartTime: isoSec(m.start), variant: VARIANT[m.tf], endDate: isoSec(m.end) });
+    return via(r.proxy, `${PTB_API}?${q}`);
+  }
+  function readAnswer(r, j) {
+    if (r.kind === "equity") { const p = Number(j?.price ?? j?.priceToBeat); return { open: p > 0 ? p : null, close: null, completed: false }; }
+    return { open: Number(j?.openPrice) > 0 ? Number(j.openPrice) : null, close: j?.closePrice != null && Number(j.closePrice) > 0 ? Number(j.closePrice) : null, completed: !!j?.completed };
+  }
   async function fetchOfficial(m, force = false) {
     const o = official[m.id] || (official[m.id] = {});
     const now = Date.now();
-    if (o.done || (o.open && m.end > now && !force)) return o;          // price to beat never changes once set
-    if (now < officialPauseUntil || now - (o.at || 0) < 20000 || now - officialLast < 700) return o;
-    o.at = now; officialLast = now;
+    if (o.done || (o.open && m.end > now && !force)) return o;             // the price to beat never changes once set
+    // right after T0 ask every 4s (Polymarket publishes with a short delay), otherwise every 20s
+    const gap = now - m.start < 90000 ? 4000 : 20000;
+    if (now - (o.at || 0) < gap || now - officialLast < 350 || o.busy) return o;
+    o.at = now; officialLast = now; o.busy = true;
+    const routes = [...PTB_ROUTES].sort((a, b) => (a.name === workingRoute ? -1 : b.name === workingRoute ? 1 : 0)).filter(r => now >= (routeDownUntil[r.name] || 0));
     try {
-      const q = new URLSearchParams({ symbol: m.asset, eventStartTime: isoSec(m.start), variant: VARIANT[m.tf], endDate: isoSec(m.end) });
-      const r = await fetch(`https://polymarket.com/api/crypto/crypto-price?${q}`, { cache: "no-store" });
-      if (!r.ok) throw new Error(r.status);
-      const j = await r.json(); officialFails = 0;
-      if (Number(j.openPrice) > 0) o.open = Number(j.openPrice);
-      if (j.closePrice != null && Number(j.closePrice) > 0) o.close = Number(j.closePrice);
-      if (j.completed && o.open && o.close) o.done = true;
-      emitSoon("spot", 150);
-    } catch { if (++officialFails >= 3) { officialFails = 0; officialPauseUntil = Date.now() + 5 * 60000; } }
+      for (const r of routes) {
+        try {
+          const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), 6000);
+          const res = await fetch(routeUrl(r, m), { cache: "no-store", signal: ctrl.signal }).finally(() => clearTimeout(timer));
+          if (res.status === 404 && r.kind === "equity") { routeDownUntil[r.name] = Date.now() + 30 * 60000; continue; }
+          if (!res.ok) throw new Error(res.status);
+          const a = readAnswer(r, await res.json());
+          const live = state.chainlink[m.asset]?.price ?? state.spot[m.asset]?.price;
+          if (!live) { o.at = Date.now() - 2000; return o; }              // can't verify yet: ask again in a moment
+          const cap = captured[`${m.asset}:${m.start}`];
+          const sane = v => v > 0 && Math.abs(v - live) / live < 0.08 && (cap == null || Math.abs(v - cap) / cap < 0.003);
+          if (a.open != null && !sane(a.open)) continue;                  // not a real price for this coin: ignore this answer
+          if (workingRoute !== r.name) { workingRoute = r.name; }
+          if (state.status.ptb !== "live") { state.status.ptb = "live"; emit("status"); }
+          if (a.open != null) o.open = a.open;
+          if (a.close != null) o.close = a.close;
+          if (a.completed && o.open && o.close) o.done = true;
+          if (a.open != null || m.start > now - 90000) { emitSoon("spot", 100); return o; } // got it, or it's just not published yet
+        } catch {
+          routeDownUntil[r.name] = Date.now() + (workingRoute === r.name ? 20000 : 3 * 60000);
+          if (workingRoute === r.name) workingRoute = null;
+        }
+      }
+      if (!workingRoute && state.status.ptb !== "error") { state.status.ptb = "error"; emit("status"); }
+    } finally { o.busy = false; }
     return o;
   }
 
@@ -626,17 +666,14 @@ window.BlueEdgeData = (() => {
     const o = official[m.id];
     if (o?.open > 0) return { price: o.open, source: "Polymarket", exact: true };
     fetchOfficial(m);
-    const key = `${m.asset}:${m.tf}:${m.start}`;
     if (usesBinance(m)) {
-      const b = binOpen[key] ?? null;
-      if (b == null) fetchBinanceOpen(m);
-      return b != null ? { price: b, source: "Binance 1h open", exact: true } : null;
+      const key = `${m.asset}:${m.tf}:${m.start}`;
+      if (binOpen[key] == null) fetchBinanceOpen(m);
+      return binOpen[key] != null ? { price: binOpen[key], source: "Binance 1h open", exact: true } : { price: null, source: "", syncing: true };
     }
     const cap = captured[`${m.asset}:${m.start}`];
-    if (cap != null) return { price: cap, source: "Chainlink", exact: true };
-    const b = binOpen[key] ?? state.opens[key] ?? null;
-    if (b == null) fetchBinanceOpen(m);
-    return b != null ? { price: b, source: "Binance open", exact: false } : null;
+    if (cap != null) return { price: cap, source: "Chainlink at open", exact: true };
+    return { price: null, source: "", syncing: true };
   }
   function livePrice(m) {
     const c = state.chainlink[m.asset], s = state.spot[m.asset];

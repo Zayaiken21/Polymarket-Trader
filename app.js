@@ -76,7 +76,7 @@
   function vm(m, now = Date.now()) {
     const ub = D.bookFor(m.upToken), db = D.bookFor(m.downToken);
     const ptb = D.priceToBeat(m), lp = D.livePrice(m);
-    const ctx = { now, up: { bid: ub.bid ?? null, ask: ub.ask ?? null }, down: { bid: db.bid ?? null, ask: db.ask ?? null }, open: ptb?.exact ? ptb.price : null, shownOpen: ptb?.price ?? null, openExact: !!ptb?.exact, openSource: ptb?.source || "", spot: lp?.price ?? null, spotSource: lp?.source || "" };
+    const ctx = { now, up: { bid: ub.bid ?? null, ask: ub.ask ?? null }, down: { bid: db.bid ?? null, ask: db.ask ?? null }, open: ptb?.exact ? ptb.price : null, shownOpen: ptb?.exact ? ptb.price : null, openExact: !!ptb?.exact, openSource: ptb?.source || "", spot: lp?.price ?? null, spotSource: lp?.source || "" };
     const um = mid(ctx.up), dm = mid(ctx.down);
     return {
       m, ctx, decision: S.evaluate(strategy, m, ctx), res: D.resolutionFor(m.id),
@@ -159,7 +159,7 @@
     set(field(el, "upAsk"), cents(v.ctx.up.ask));
     set(field(el, "downAsk"), cents(v.ctx.down.ask));
     field(el, "split").style.transform = `scaleX(${(v.upProb ?? 0.5).toFixed(4)})`;
-    set(field(el, "spot"), v.ctx.shownOpen != null ? `To beat ${v.ctx.openExact ? "" : "~"}${fmtPrice(v.ctx.shownOpen)}` : v.m.start > now ? "To beat: set at open" : "To beat: …");
+    set(field(el, "spot"), v.ctx.shownOpen != null ? `To beat ${fmtPrice(v.ctx.shownOpen)}` : v.m.start > now ? "To beat: at open" : "To beat —");
     const mv = field(el, "move");
     set(mv, v.ctx.spot == null ? "" : `${fmtPrice(v.ctx.spot)}${v.move == null ? "" : ` ${v.move >= 0 ? "▲" : "▼"}${(Math.abs(v.move) * 100).toFixed(3)}%`}`);
     mv.className = v.move == null ? "" : v.move >= 0 ? "gain" : "loss";
@@ -169,7 +169,7 @@
       set(st, v.res ? `Resolved ${v.res.winner}${v.res.official ? "" : " (estimated)"}${held ? `, you held ${held.side}` : ""}` : "Waiting for the official result…");
       st.className = "mc-status " + (v.res ? (v.res.winner === "Up" ? "res-up" : "res-down") : "wait");
     } else {
-      set(st, held ? `You hold ${held.side}` : v.decision.reason);
+      set(st, held ? `You hold ${held.side}` : v.decision.reason === "Waiting for the price to beat" ? "Syncing Polymarket's price to beat" : v.decision.reason);
       st.className = "mc-status " + (held ? "held" : v.decision.ok ? "ready" : /are off/.test(v.decision.reason) ? "off" : "wait");
     }
     el.classList.toggle("is-ready", v.decision.ok && !held);
@@ -303,7 +303,7 @@
     set(f("upAsk"), cents(v.ctx.up.ask)); set(f("downAsk"), cents(v.ctx.down.ask));
     set(f("upBid"), `sell ${cents(v.ctx.up.bid)}`); set(f("downBid"), `sell ${cents(v.ctx.down.bid)}`);
     $$(".side", el).forEach(b => b.setAttribute("aria-checked", String(b.dataset.side === side)));
-    set(f("open"), v.ctx.shownOpen == null ? (m.start > now ? `Set when it opens in ${clock(m.start - now)}` : "…") : `${v.ctx.openExact ? "" : "~"}${fmtPrice(v.ctx.shownOpen)} (${v.ctx.openSource}${v.ctx.openExact ? "" : "; exact from the next window"})`);
+    set(f("open"), v.ctx.shownOpen == null ? (m.start > now ? `Set when it opens in ${clock(m.start - now)}` : "Syncing with Polymarket") : `${fmtPrice(v.ctx.shownOpen)} (${v.ctx.openSource})`);
     set(f("spot"), v.ctx.spot == null ? "—" : `${fmtPrice(v.ctx.spot)} ${v.ctx.spotSource ? `(${v.ctx.spotSource})` : ""}`);
     const mv = f("move"); set(mv, v.move == null ? "—" : `${v.move >= 0 ? "+" : "−"}$${Math.abs(v.ctx.spot - v.ctx.shownOpen).toFixed(v.ctx.shownOpen >= 100 ? 2 : v.ctx.shownOpen >= 1 ? 4 : 5)} ${v.move >= 0 ? "above" : "below"} (${(Math.abs(v.move) * 100).toFixed(3)}%)`);
     set(f("liq"), m.liquidity ? "$" + Math.round(m.liquidity).toLocaleString() : "—");
@@ -1003,6 +1003,8 @@
 
   document.addEventListener("click", async e => {
     const t = e.target, q = sel => t.closest(sel);
+    const ext = t.closest('a[href^="https://polymarket.com/"]');
+    if (ext) { e.preventDefault(); const w = window.open(ext.href, "_blank", "noopener"); if (!w) location.href = ext.href; return; }
     let el;
     if ((el = q("[data-copy]"))) return copy(el.dataset.copy);
     if ((el = q("[data-sell]"))) { e.stopPropagation(); return paperSell(el.dataset.sell); }
