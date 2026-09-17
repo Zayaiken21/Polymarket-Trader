@@ -411,6 +411,17 @@ input[type="text"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rg
 .toast.out { opacity: 0; transform: translateY(8px); }
 @keyframes toast-in { from { opacity: 0; transform: translateY(10px); } }
 
+/* ---------- add to home screen banner ---------- */
+.install-banner {
+  position: fixed; z-index: 70; left: 10px; right: 10px; top: calc(var(--safe-t) + 10px);
+  display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+  background: #11294A; border: 1px solid var(--line); border-radius: var(--radius); box-shadow: 0 12px 30px rgba(0, 0, 0, .35);
+  font-size: 13px; font-weight: 600; animation: toast-in .25s ease;
+}
+.install-banner span { flex: 1; }
+.install-banner[hidden] { display: none; }
+
+
 /* ---------- tablet ---------- */
 @media (min-width: 640px) {
   .stats { grid-template-columns: repeat(4, 1fr); }

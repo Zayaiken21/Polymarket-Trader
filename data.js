@@ -632,8 +632,12 @@ window.BlueEdgeData = (() => {
           const a = readAnswer(r, await res.json());
           const live = state.chainlink[m.asset]?.price ?? state.spot[m.asset]?.price;
           if (!live) { o.at = Date.now() - 2000; return o; }              // can't verify yet: ask again in a moment
-          const cap = captured[`${m.asset}:${m.tf}:${m.start}`];
-          const sane = v => v > 0 && Math.abs(v - live) / live < 0.08 && (cap == null || Math.abs(v - cap) / cap < 0.003);
+          // Only guard against garbage (wrong asset, proxy error page, etc.) with a wide band against the live
+          // price. Do NOT require it to match our own local Chainlink capture: that capture is just our best
+          // guess before Polymarket's real number arrives, and requiring agreement with it was throwing away
+          // genuinely correct official answers whenever our own guess was even slightly off (the reason 5m/15m
+          // markets were stuck showing "Chainlink at open" instead of Polymarket's real value).
+          const sane = v => v > 0 && Math.abs(v - live) / live < 0.08;
           if (a.open != null && !sane(a.open)) continue;                  // not a real price for this coin: ignore this answer
           if (workingRoute !== r.name) { workingRoute = r.name; }
           if (state.status.ptb !== "live") { state.status.ptb = "live"; emit("status"); }

@@ -838,7 +838,7 @@
   }
 
   /* settings: live accounts */
-  let revealed = null, revealTimer = null, submitting = false, panelMode = null, editPrefill = null;
+  let revealed = null, revealTimer = null, submitting = false, panelMode = null, editPrefill = null, unlockedPasscode = null;
   const WT = L.WALLET_TYPES;
   const secretInput = (name, label, placeholder, help, value = "") => `<label class="field"><span>${label}</span><div class="reveal-wrap"><input type="password" name="${name}" value="${esc(value)}" placeholder="${esc(placeholder)}" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"><button type="button" class="eye" data-eye>Show</button></div>${help ? `<small>${help}</small>` : ""}</label>`;
   const textInput = (name, label, placeholder, help, value = "") => `<label class="field"><span>${label}</span><input type="text" name="${name}" value="${esc(value)}" placeholder="${esc(placeholder)}" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">${help ? `<small>${help}</small>` : ""}</label>`;
@@ -887,6 +887,8 @@
         <p class="hint">Hidden again in 2 minutes.</p>
       </div>`;
     }
+    // Already typed the passcode once to unlock this session: don't ask again, just reveal on tap.
+    if (unlockedPasscode && L.state.activeId === a.id && L.isUnlocked()) return `<button class="btn ghost" data-action="reveal-now">View or edit all keys</button>`;
     return `<form id="revealForm" autocomplete="off" novalidate class="reveal-form">
       ${secretInput("passcode", "Passcode to view or edit keys", "", "")}
       <button class="btn ghost" type="submit">View all keys and addresses</button>
@@ -1034,7 +1036,7 @@
     if ((el = q("[data-live-fill]"))) return liveFillDetail(Number(el.dataset.liveFill));
     if ((el = q("[data-live-closed]"))) return liveClosedDetail(Number(el.dataset.liveClosed));
     if ((el = q("[data-eye]"))) { const inp = el.previousElementSibling; inp.type = inp.type === "password" ? "text" : "password"; el.textContent = inp.type === "password" ? "Show" : "Hide"; return; }
-    if ((el = q("[data-use-account]"))) { if (botOn && isLive()) { botOn = false; write(K.bot, false); } revealed = null; await L.setActive(el.dataset.useAccount); toast("Account selected. Unlock it with its passcode.", "info"); return render(); }
+    if ((el = q("[data-use-account]"))) { if (botOn && isLive()) { botOn = false; write(K.bot, false); } revealed = null; unlockedPasscode = null; await L.setActive(el.dataset.useAccount); toast("Account selected. Unlock it with its passcode.", "info"); return render(); }
     if ((el = q("[data-remove-account]"))) {
       const acc = L.list().find(x => x.id === el.dataset.removeAccount);
       if (!acc || !confirm(`Remove "${acc.label}" from this device?\n\nSave all accounts to a file first if you want to load it again later.`)) return;
@@ -1075,8 +1077,12 @@
       case "export-account": try { const n = L.exportFile(); toast(`Saved ${n} encrypted account${n === 1 ? "" : "s"} to a JSON file on this device.`, "good"); } catch (err) { toast(err.message, "bad"); } return;
       case "lock":
         if (botOn && isLive()) { botOn = false; write(K.bot, false); }
-        revealed = null; await L.lock(); toast("Live account locked.", "info"); return render();
+        revealed = null; unlockedPasscode = null; await L.lock(); toast("Live account locked.", "info"); return render();
       case "hide-secrets": revealed = null; clearTimeout(revealTimer); $("#livePanel")._sig = null; return render();
+      case "reveal-now":
+        try { revealed = { ...(await L.reveal(L.state.activeId, unlockedPasscode)), passcode: unlockedPasscode }; clearTimeout(revealTimer); revealTimer = setTimeout(() => { revealed = null; $("#livePanel")._sig = null; render(); }, 120000); }
+        catch (err) { toast(err.message, "bad"); }
+        $("#livePanel")._sig = null; return render();
       case "add-account": panelMode = "add"; editPrefill = null; revealed = null; $("#livePanel")._sig = null; draw(); $("#livePanel").scrollIntoView({ block: "start", behavior: "smooth" }); return;
       case "edit-account": if (!revealed) return; panelMode = "edit"; editPrefill = revealed; $("#livePanel")._sig = null; draw(); $("#livePanel").scrollIntoView({ block: "start", behavior: "smooth" }); return;
       case "cancel-form": panelMode = null; editPrefill = null; $("#livePanel")._sig = null; return draw();
@@ -1124,6 +1130,7 @@
         unlockAfter = { id: meta.id, passcode: data.passcode };
       } else if (form.id === "unlockForm") {
         await L.unlock(L.state.activeId, data.passcode);
+        unlockedPasscode = data.passcode;
         toast(L.canTrade() ? "Unlocked. This account can trade." : `Unlocked read-only. ${L.state.message || ""}`, L.canTrade() ? "good" : "info");
         rerender = true;
       } else {
@@ -1143,7 +1150,7 @@
       render();
     }
     if (unlockAfter) {
-      try { await L.unlock(unlockAfter.id, unlockAfter.passcode); toast(L.canTrade() ? "Connected. This account can trade." : `Connected read-only. ${L.state.message || ""}`, L.canTrade() ? "good" : "info"); }
+      try { await L.unlock(unlockAfter.id, unlockAfter.passcode); unlockedPasscode = unlockAfter.passcode; toast(L.canTrade() ? "Connected. This account can trade." : `Connected read-only. ${L.state.message || ""}`, L.canTrade() ? "good" : "info"); }
       catch (err) { toast(err.message, "bad"); }
       $("#livePanel")._sig = null; render();
     }
@@ -1240,6 +1247,42 @@
   document.addEventListener("touchmove", e => { if (e.touches.length > 1 && !e.target.closest?.(".chart-host")) e.preventDefault(); }, { passive: false });
   L.on(render);
   C.onUpdate(() => applyChartLine());
+
+  /* ---------- Add to Home Screen ---------- */
+  (function initInstallBanner() {
+    const banner = $("#installBanner"), text = $("#installBannerText"), goBtn = $("#installBannerGo"), closeBtn = $("#installBannerClose");
+    if (!banner) return;
+    const DISMISS_KEY = "blueedge.installDismissedAt";
+    const isStandalone = window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true;
+    if (isStandalone) return;
+    const dismissedAt = Number(localStorage.getItem(DISMISS_KEY) || 0);
+    if (Date.now() - dismissedAt < 14 * 24 * 3600000) return; // don't nag more than once every 2 weeks
+    let hideTimer = null;
+    const hide = () => { banner.hidden = true; clearTimeout(hideTimer); };
+    const show = msg => { text.textContent = msg; banner.hidden = false; clearTimeout(hideTimer); hideTimer = setTimeout(hide, 10000); };
+    closeBtn.addEventListener("click", () => { localStorage.setItem(DISMISS_KEY, String(Date.now())); hide(); });
+
+    let deferredPrompt = null;
+    window.addEventListener("beforeinstallprompt", e => {
+      e.preventDefault(); deferredPrompt = e; goBtn.style.display = "";
+      show("Install BlueEdge as an app on this device.");
+    });
+    goBtn.addEventListener("click", async () => {
+      if (!deferredPrompt) return hide();
+      deferredPrompt.prompt();
+      const { outcome } = await deferredPrompt.userChoice;
+      deferredPrompt = null; hide();
+      if (outcome === "accepted") localStorage.setItem(DISMISS_KEY, String(Date.now()));
+    });
+
+    const ua = navigator.userAgent;
+    const isIOS = /iphone|ipad|ipod/i.test(ua) && !window.MSStream;
+    const isSafari = isIOS && /safari/i.test(ua) && !/crios|fxios|opios/i.test(ua);
+    if (isIOS && isSafari) { goBtn.style.display = "none"; show('Tap Share, then "Add to Home Screen" to install BlueEdge.'); }
+
+    if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+  })();
+
 
   /* ---------- start ---------- */
   if (mode === "live" && !L.hasVault()) { mode = "paper"; write(K.mode, mode); }

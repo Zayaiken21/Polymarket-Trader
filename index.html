@@ -9,10 +9,19 @@
   <meta name="theme-color" content="#030B1A">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="BlueEdge">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon-192.png">
+  <link rel="apple-touch-icon" href="icon-192.png">
   <title>BlueEdge · Polymarket crypto trader</title>
   <link rel="stylesheet" href="styles.css?v=3.4.6">
 </head>
 <body>
+  <div id="installBanner" class="install-banner" hidden>
+    <span id="installBannerText"></span>
+    <button type="button" id="installBannerGo" class="btn small">Add</button>
+    <button type="button" id="installBannerClose" class="btn small ghost" aria-label="Dismiss">✕</button>
+  </div>
   <div class="shell">
     <aside class="rail">
       <a class="brand" href="#home" aria-label="BlueEdge home">
