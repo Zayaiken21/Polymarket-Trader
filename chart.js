@@ -1,4 +1,7 @@
-/* BlueEdge chart: real Binance candles (REST history + WebSocket realtime) drawn with TradingView Lightweight Charts. */
+/* BlueEdge chart: real Binance candles (REST history + WebSocket realtime) drawn with TradingView Lightweight Charts.
+   Adds: markup/drawing tools (trendline, ray, horizontal line, rectangle, fib retracement, text),
+   precise zoom controls, and a touch-friendly mobile toolbar. None of this adds any network calls —
+   drawings are pure client-side canvas + localStorage, so the existing Binance rate budget is untouched. */
 window.BlueEdgeChart = (() => {
   // Global Binance only (same prices Binance.com shows). Binance.US is a separate, thinner exchange and is never mixed in.
   const REST = ["https://data-api.binance.vision", "https://api.binance.com", "https://api-gcp.binance.com", "https://api1.binance.com", "https://api2.binance.com", "https://api3.binance.com", "https://api4.binance.com"];
@@ -62,6 +65,318 @@ window.BlueEdgeChart = (() => {
     return precisionCache[sym];
   }
 
+  /* ==================== Drawing & markup tools ==================== */
+  const DRAW_COLORS = ["#4DA3FF", "#FFB13D", "#FF6F7D", "#2ECF8E", "#C792EA", "#F5F7FA"];
+  const FIB_LEVELS = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1];
+  let tool = "cursor", drawColor = DRAW_COLORS[0], drawWidth = 2;
+  let drawings = [], selectedId = null, draft = null, hoverPt = null;
+  let dragHandle = null; // { id, index } while dragging an existing point
+  let uiRoot = null, toolbarEl = null, colorBtn = null, widthBtn = null;
+  let drawPrimitive = null;
+
+  function uid() { return Math.random().toString(36).slice(2, 9); }
+  const storeKey = () => `blueedge.drawings.${symbol}`;
+  function saveDrawings() { try { localStorage.setItem(storeKey(), JSON.stringify(drawings)); } catch {} }
+  function loadDrawingsFor(sym) {
+    drawings = []; selectedId = null; draft = null;
+    try { drawings = JSON.parse(localStorage.getItem(`blueedge.drawings.${sym}`) || "[]") || []; } catch { drawings = []; }
+    refreshPrimitive();
+  }
+
+  function X(time) { return chart?.timeScale().timeToCoordinate(time); }
+  function Y(price) { return candles?.priceToCoordinate(price); }
+  function toTime(x) { return chart?.timeScale().coordinateToTime(x); }
+  function toPrice(y) { return candles?.coordinateToPrice(y); }
+
+  function distToSeg(px, py, x1, y1, x2, y2) {
+    const dx = x2 - x1, dy = y2 - y1, len2 = dx * dx + dy * dy;
+    let t = len2 ? ((px - x1) * dx + (py - y1) * dy) / len2 : 0;
+    t = Math.max(0, Math.min(1, t));
+    const cx = x1 + t * dx, cy = y1 + t * dy;
+    return Math.hypot(px - cx, py - cy);
+  }
+
+  function hitTest(px, py) {
+    for (let i = drawings.length - 1; i >= 0; i--) {
+      const d = drawings[i];
+      const pts = d.points.map(p => ({ x: X(p.time), y: Y(p.price) })).filter(p => p.x != null && p.y != null);
+      if (pts.length < 1) continue;
+      if (d.type === "hline") { if (Math.abs(py - pts[0].y) < 6) return d; }
+      else if (d.type === "ray") { const w = host.clientWidth; if (distToSeg(px, py, pts[0].x, pts[0].y, w, pts[0].y + (pts[1] ? (pts[1].y - pts[0].y) : 0)) < 6) return d; }
+      else if (d.type === "trend") { if (pts[1] && distToSeg(px, py, pts[0].x, pts[0].y, pts[1].x, pts[1].y) < 6) return d; }
+      else if (d.type === "rect" || d.type === "fib") {
+        if (!pts[1]) continue;
+        const x0 = Math.min(pts[0].x, pts[1].x), x1 = Math.max(pts[0].x, pts[1].x);
+        const y0 = Math.min(pts[0].y, pts[1].y), y1 = Math.max(pts[0].y, pts[1].y);
+        if (px >= x0 - 4 && px <= x1 + 4 && py >= y0 - 4 && py <= y1 + 4) return d;
+      } else if (d.type === "text") {
+        if (Math.hypot(px - pts[0].x, py - pts[0].y - 8) < 16) return d;
+      }
+    }
+    return null;
+  }
+
+  function handleAt(px, py) {
+    if (!selectedId) return null;
+    const d = drawings.find(dd => dd.id === selectedId);
+    if (!d) return null;
+    for (let i = 0; i < d.points.length; i++) {
+      const p = d.points[i];
+      const x = X(p.time), y = Y(p.price);
+      if (x == null || y == null) continue;
+      if (Math.hypot(px - x, py - y) < 12) return { id: d.id, index: i };
+    }
+    return null;
+  }
+
+  function commit(d) { drawings.push(d); saveDrawings(); refreshPrimitive(); }
+  function undo() { drawings.pop(); saveDrawings(); refreshPrimitive(); }
+  function clearAll() { if (!drawings.length) return; drawings = []; selectedId = null; saveDrawings(); refreshPrimitive(); }
+  function removeDrawing(id) { drawings = drawings.filter(d => d.id !== id); if (selectedId === id) selectedId = null; saveDrawings(); refreshPrimitive(); }
+
+  function setChartInteractive(on) {
+    chart?.applyOptions({ handleScroll: on ? { vertTouchDrag: false } : false, handleScale: on });
+  }
+
+  /* ---- pointer interaction, mouse + touch via Pointer Events ---- */
+  function relPoint(e) {
+    const r = host.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+
+  function onPointerDown(e) {
+    if (!chart) return;
+    const { x, y } = relPoint(e);
+    if (tool === "eraser") { const hit = hitTest(x, y); if (hit) removeDrawing(hit.id); return; }
+    if (tool === "cursor") {
+      const h = handleAt(x, y);
+      if (h) { dragHandle = h; setChartInteractive(false); e.preventDefault?.(); host.setPointerCapture?.(e.pointerId); return; }
+      const hit = hitTest(x, y);
+      selectedId = hit ? hit.id : null;
+      refreshPrimitive();
+      return;
+    }
+    if (tool === "text") {
+      const time = toTime(x), price = toPrice(y);
+      if (time == null || price == null) return;
+      openTextInput(x, y, time, price);
+      return;
+    }
+    if (tool === "hline") {
+      const price = toPrice(y);
+      if (price == null) return;
+      commit({ id: uid(), type: "hline", color: drawColor, width: drawWidth, points: [{ time: data[0]?.time ?? 0, price }] });
+      setTool("cursor");
+      return;
+    }
+    // two-click shapes: trend, ray, rect, fib
+    const time = toTime(x), price = toPrice(y);
+    if (time == null || price == null) return;
+    if (!draft) {
+      draft = { id: uid(), type: tool, color: drawColor, width: drawWidth, points: [{ time, price }] };
+    } else {
+      draft.points.push({ time, price });
+      commit(draft);
+      draft = null; hoverPt = null;
+      setTool("cursor");
+    }
+  }
+  function onPointerMove(e) {
+    if (!chart) return;
+    const { x, y } = relPoint(e);
+    if (dragHandle) {
+      const time = toTime(x), price = toPrice(y);
+      if (time != null && price != null) {
+        const d = drawings.find(dd => dd.id === dragHandle.id);
+        if (d) { d.points[dragHandle.index] = { time, price }; refreshPrimitive(); }
+      }
+      return;
+    }
+    if (draft) {
+      const time = toTime(x), price = toPrice(y);
+      if (time != null && price != null) { hoverPt = { time, price }; refreshPrimitive(); }
+    }
+  }
+  function onPointerUp() {
+    if (dragHandle) { dragHandle = null; setChartInteractive(true); saveDrawings(); }
+  }
+  function onDblClick() {
+    if (draft) { draft = null; hoverPt = null; refreshPrimitive(); return; }
+    if (!selectedId) chart.timeScale().fitContent();
+  }
+  function onKeyDown(e) {
+    if (e.key === "Escape") { draft = null; hoverPt = null; selectedId = null; setTool("cursor"); }
+    if ((e.key === "Delete" || e.key === "Backspace") && selectedId && document.activeElement === document.body) { removeDrawing(selectedId); }
+  }
+
+  function openTextInput(x, y, time, price) {
+    const box = document.createElement("div");
+    box.contentEditable = "true";
+    box.className = "be-text-input";
+    box.style.left = x + "px"; box.style.top = Math.max(0, y - 10) + "px"; box.style.color = drawColor;
+    uiRoot.appendChild(box);
+    box.focus();
+    const finish = () => {
+      const txt = box.textContent.trim();
+      box.remove();
+      if (txt) commit({ id: uid(), type: "text", color: drawColor, width: drawWidth, text: txt, points: [{ time, price }] });
+      setTool("cursor");
+    };
+    box.addEventListener("blur", finish, { once: true });
+    box.addEventListener("keydown", ev => { if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); box.blur(); } if (ev.key === "Escape") { box.textContent = ""; box.blur(); } });
+  }
+
+  /* ---- rendering via Lightweight Charts v5 primitive API ---- */
+  class DrawingsPrimitive {
+    paneViews() { return [{ renderer: () => ({ draw: target => target.useMediaCoordinateSpace(({ context, mediaSize }) => renderAll(context, mediaSize)) }) }]; }
+    updateAllViews() {}
+  }
+  function refreshPrimitive() { drawPrimitive?.applyOptions?.(); chart && requestAnimationFrame(() => chart.timeScale().applyOptions({})); }
+
+  function strokeStyle(ctx, color, width, dashed) {
+    ctx.strokeStyle = color; ctx.lineWidth = width; ctx.setLineDash(dashed ? [6, 4] : []);
+  }
+  function renderAll(ctx, size) {
+    const all = draft ? [...drawings, { ...draft, points: hoverPt ? [...draft.points, hoverPt] : draft.points, ghost: true }] : drawings;
+    for (const d of all) renderOne(ctx, size, d);
+  }
+  function renderOne(ctx, size, d) {
+    const pts = d.points.map(p => ({ x: X(p.time), y: Y(p.price) }));
+    if (pts.some(p => p.x == null || p.y == null)) return;
+    const isSel = d.id === selectedId;
+    ctx.save();
+    strokeStyle(ctx, d.color, d.width + (isSel ? 1 : 0), d.ghost);
+    ctx.globalAlpha = d.ghost ? 0.75 : 1;
+    if (d.type === "hline") {
+      ctx.beginPath(); ctx.moveTo(0, pts[0].y); ctx.lineTo(size.width, pts[0].y); ctx.stroke();
+      label(ctx, d, size.width - 4, pts[0].y - 6, "right");
+    } else if (d.type === "ray") {
+      const p1 = pts[1] || pts[0];
+      const dx = p1.x - pts[0].x, dy = p1.y - pts[0].y;
+      const ext = dx === 0 ? 0 : (size.width - pts[0].x) / (dx || 1);
+      ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y); ctx.lineTo(dx === 0 ? pts[0].x : size.width, dx === 0 ? size.height : pts[0].y + dy * Math.max(ext, 1)); ctx.stroke();
+    } else if (d.type === "trend") {
+      if (pts[1]) { ctx.beginPath(); ctx.moveTo(pts[0].x, pts[0].y); ctx.lineTo(pts[1].x, pts[1].y); ctx.stroke(); }
+    } else if (d.type === "rect") {
+      if (pts[1]) {
+        const x0 = Math.min(pts[0].x, pts[1].x), y0 = Math.min(pts[0].y, pts[1].y);
+        const w = Math.abs(pts[1].x - pts[0].x), h = Math.abs(pts[1].y - pts[0].y);
+        ctx.fillStyle = d.color + "26"; ctx.fillRect(x0, y0, w, h); ctx.strokeRect(x0, y0, w, h);
+      }
+    } else if (d.type === "fib") {
+      if (pts[1]) {
+        const x0 = Math.min(pts[0].x, pts[1].x), x1 = Math.max(pts[0].x, pts[1].x);
+        const p0 = d.points[0].price, p1 = d.points[1].price;
+        for (const lvl of FIB_LEVELS) {
+          const price = p0 + (p1 - p0) * lvl;
+          const y = Y(price); if (y == null) continue;
+          ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x1, y); ctx.stroke();
+          ctx.font = "11px sans-serif"; ctx.fillStyle = d.color;
+          ctx.fillText(`${(lvl * 100).toFixed(1)}%`, x0 + 4, y - 3);
+        }
+      }
+    } else if (d.type === "text") {
+      ctx.font = "600 13px sans-serif"; ctx.fillStyle = d.color; ctx.fillText(d.text, pts[0].x, pts[0].y);
+    }
+    if (isSel) {
+      ctx.setLineDash([]); ctx.fillStyle = d.color;
+      for (const p of pts) { ctx.beginPath(); ctx.arc(p.x, p.y, 5, 0, 7); ctx.fill(); ctx.strokeStyle = "#0008"; ctx.lineWidth = 1.5; ctx.stroke(); }
+    }
+    ctx.restore();
+  }
+  function label(ctx, d, x, y, align) {
+    ctx.font = "11px sans-serif"; ctx.fillStyle = d.color; ctx.textAlign = align; ctx.fillText(d.points[0].price?.toFixed?.(4) ?? "", x, y); ctx.textAlign = "left";
+  }
+
+  /* ---- toolbar UI (works with mouse and touch, scrolls horizontally on narrow screens) ---- */
+  const TOOL_DEFS = [
+    ["cursor", "M4 3l14 6-6 2-2 6-6-14z", "Select / pan"],
+    ["trend", "M3 17L17 3", "Trend line"],
+    ["ray", "M3 17L17 3M17 3v6M17 3h-6", "Ray"],
+    ["hline", "M3 10h14", "Horizontal line"],
+    ["rect", "M3 4h14v12H3z", "Rectangle"],
+    ["fib", "M3 4h14M3 8h10M3 12h14M3 16h6", "Fib retracement"],
+    ["text", "M4 4h12M10 4v12", "Text note"],
+    ["eraser", "M4 13l6-6 6 6-4 4H8z", "Erase (tap a drawing)"]
+  ];
+  function injectStyle() {
+    if (document.getElementById("be-chart-tools-style")) return;
+    const s = document.createElement("style"); s.id = "be-chart-tools-style";
+    s.textContent = `
+      .be-toolbar{position:absolute;z-index:5;display:flex;gap:4px;padding:5px;border-radius:12px;
+        background:rgba(12,20,30,.82);backdrop-filter:blur(8px);border:1px solid rgba(120,160,200,.18);
+        box-shadow:0 4px 16px rgba(0,0,0,.35);align-items:center}
+      .be-toolbar.side{right:10px;top:10px;flex-direction:column}
+      .be-toolbar button{width:32px;height:32px;display:flex;align-items:center;justify-content:center;
+        border:none;border-radius:8px;background:transparent;color:#8BA4BF;cursor:pointer;padding:0;flex:0 0 auto}
+      .be-toolbar button svg{width:16px;height:16px;pointer-events:none}
+      .be-toolbar button:active{background:rgba(120,160,200,.15)}
+      .be-toolbar button.active{background:#4DA3FF;color:#08131f}
+      .be-toolbar .be-sep{width:1px;align-self:stretch;background:rgba(120,160,200,.2);margin:2px}
+      .be-toolbar.side .be-sep{width:auto;height:1px}
+      .be-swatch{width:18px;height:18px;border-radius:50%;border:2px solid rgba(255,255,255,.5)}
+      .be-text-input{position:absolute;z-index:6;min-width:40px;outline:none;font:600 13px sans-serif;
+        background:rgba(12,20,30,.7);border:1px dashed currentColor;border-radius:4px;padding:1px 4px}
+      @media (max-width:640px){
+        .be-toolbar{left:6px;right:6px;bottom:8px;top:auto;flex-direction:row;overflow-x:auto;
+          -webkit-overflow-scrolling:touch;justify-content:flex-start}
+        .be-toolbar button{width:38px;height:38px}
+        .be-toolbar .be-sep{display:none}
+      }
+    `;
+    document.head.appendChild(s);
+  }
+  function icon(path) { return `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="${path}"/></svg>`; }
+
+  function buildToolbar() {
+    toolbarEl = document.createElement("div");
+    toolbarEl.className = "be-toolbar side";
+    const mkBtn = (title, html, onClick) => {
+      const b = document.createElement("button"); b.title = title; b.innerHTML = html;
+      b.addEventListener("click", ev => { ev.stopPropagation(); onClick(); });
+      toolbarEl.appendChild(b); return b;
+    };
+    for (const [id, path, title] of TOOL_DEFS) {
+      const b = mkBtn(title, icon(path), () => setTool(id));
+      b.dataset.tool = id;
+    }
+    const sep1 = document.createElement("div"); sep1.className = "be-sep"; toolbarEl.appendChild(sep1);
+    colorBtn = mkBtn("Color", `<span class="be-swatch" style="background:${drawColor}"></span>`, () => {
+      const i = (DRAW_COLORS.indexOf(drawColor) + 1) % DRAW_COLORS.length;
+      drawColor = DRAW_COLORS[i];
+      colorBtn.querySelector(".be-swatch").style.background = drawColor;
+      if (selectedId) { const d = drawings.find(x => x.id === selectedId); if (d) { d.color = drawColor; saveDrawings(); refreshPrimitive(); } }
+    });
+    widthBtn = mkBtn("Line width", "2px", () => {
+      drawWidth = drawWidth === 2 ? 3 : drawWidth === 3 ? 1 : 2;
+      widthBtn.textContent = drawWidth + "px";
+      if (selectedId) { const d = drawings.find(x => x.id === selectedId); if (d) { d.width = drawWidth; saveDrawings(); refreshPrimitive(); } }
+    });
+    const sep2 = document.createElement("div"); sep2.className = "be-sep"; toolbarEl.appendChild(sep2);
+    mkBtn("Delete selected", icon("M5 6h10M8 6V4h4v2M6 6l1 10h6l1-10"), () => { if (selectedId) removeDrawing(selectedId); });
+    mkBtn("Undo last", icon("M6 8L3 5l3-3M3 5h9a5 5 0 010 10H8"), undo);
+    mkBtn("Clear all", icon("M4 5h12M7 5V3h6v2M5 5l1 12h8l1-12"), () => { if (drawings.length && confirm("Clear all drawings on this chart?")) clearAll(); });
+    const sep3 = document.createElement("div"); sep3.className = "be-sep"; toolbarEl.appendChild(sep3);
+    mkBtn("Zoom in", icon("M9 4v10M4 9h10"), () => zoomBy(0.8));
+    mkBtn("Zoom out", icon("M4 9h10"), () => zoomBy(1.25));
+    mkBtn("Fit chart", icon("M3 7V3h4M13 3h4v4M17 13v4h-4M7 17H3v-4"), () => chart.timeScale().fitContent());
+    uiRoot.appendChild(toolbarEl);
+    markActive();
+  }
+  function markActive() { toolbarEl?.querySelectorAll("button[data-tool]").forEach(b => b.classList.toggle("active", b.dataset.tool === tool)); }
+  function setTool(t) {
+    if (tool !== t) { draft = null; hoverPt = null; }
+    if (t !== "cursor") selectedId = null;
+    tool = t; markActive(); refreshPrimitive();
+    if (host) host.style.cursor = t === "cursor" ? "default" : "crosshair";
+  }
+  function zoomBy(factor) {
+    const r = chart?.timeScale().getVisibleLogicalRange();
+    if (!r) return;
+    const mid = (r.from + r.to) / 2, half = ((r.to - r.from) / 2) * factor;
+    chart.timeScale().setVisibleLogicalRange({ from: mid - half, to: mid + half });
+  }
+
   /* ---- chart ---- */
   function mount(el, legendEl, statusElement) {
     host = el; legend = legendEl; statusEl = statusElement;
@@ -74,7 +389,8 @@ window.BlueEdgeChart = (() => {
       rightPriceScale: { borderColor: "rgba(120,160,200,.18)" },
       timeScale: { borderColor: "rgba(120,160,200,.18)", timeVisible: true, secondsVisible: false, rightOffset: 6 },
       crosshair: { mode: LC.CrosshairMode.Normal },
-      handleScroll: { vertTouchDrag: false }
+      handleScroll: { vertTouchDrag: false },
+      handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true }
     });
     candles = chart.addSeries(LC.CandlestickSeries, { upColor: "#2ECF8E", downColor: "#FF6F7D", borderVisible: false, wickUpColor: "#2ECF8E", wickDownColor: "#FF6F7D" });
     volume = chart.addSeries(LC.HistogramSeries, { priceFormat: { type: "volume" }, priceScaleId: "vol", lastValueVisible: false, priceLineVisible: false });
@@ -86,6 +402,20 @@ window.BlueEdgeChart = (() => {
       const c = p?.seriesData?.get(candles);
       showLegend(c ? { ...c, volume: data.find(d => d.time === c.time)?.volume } : data[data.length - 1]);
     });
+
+    // ---- markup tools + mobile-friendly UI wiring ----
+    injectStyle();
+    if (getComputedStyle(el).position === "static") el.style.position = "relative";
+    el.style.touchAction = "pan-x pan-y";
+    uiRoot = el;
+    try { drawPrimitive = new DrawingsPrimitive(); candles.attachPrimitive(drawPrimitive); } catch {}
+    buildToolbar();
+    el.addEventListener("pointerdown", onPointerDown);
+    el.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    chart.subscribeDblClick(onDblClick);
+    document.addEventListener("keydown", onKeyDown);
+    setTool("cursor");
   }
 
   const esc = t => String(t).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -110,6 +440,7 @@ window.BlueEdgeChart = (() => {
     closeWs();
     clearPriceLine();
     candles.setData([]); volume.setData([]);
+    loadDrawingsFor(sym);
     setStatus(`Loading ${sym.replace("USDT", "")} ${iv} candles from Binance…`);
     try {
       const rows = await rest(`/api/v3/klines?symbol=${sym}&interval=${iv}&limit=${PAGE}`);
@@ -231,5 +562,11 @@ window.BlueEdgeChart = (() => {
   function pause() { gen++; closeWs(); }
   function resume() { if (symbol && chart) { const s = symbol, iv = interval; symbol = null; load(s, iv); } }
 
-  return { INTERVALS, mount, load, setPriceLine, clearPriceLine, pause, resume, onUpdate, get symbol() { return symbol; }, get interval() { return interval; } };
+  return {
+    INTERVALS, mount, load, setPriceLine, clearPriceLine, pause, resume, onUpdate,
+    get symbol() { return symbol; }, get interval() { return interval; },
+    // markup & zoom controls (also reachable via the on-chart toolbar)
+    setTool, clearDrawings: clearAll, undoDrawing: undo, zoomIn: () => zoomBy(0.8), zoomOut: () => zoomBy(1.25),
+    fitContent: () => chart?.timeScale().fitContent()
+  };
 })();
