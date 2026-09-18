@@ -335,10 +335,9 @@ window.BlueEdgeLive = (() => {
     try {
       let results;
       if (client) {
-        const { AssetType } = SDK();
         const wallet = state.account?.wallet;
         results = await Promise.allSettled([
-          client.fetchBalanceAllowance({ assetType: AssetType.COLLATERAL }).then(b => Number(b.balance) / 1e6),
+          fetchCollateralBalance(),
           allItems(client.listOpenOrders(), 5),
           wallet ? publicPositions(wallet).catch(() => allItems(client.listPositions(), 5)) : allItems(client.listPositions(), 5),
           allItems(client.listAccountTrades(), 3)
@@ -405,7 +404,7 @@ window.BlueEdgeLive = (() => {
     if (!client) add("Signer key", meta.hasKey ? false : null, meta.hasKey ? "Private key saved but Polymarket sign-in failed." : "No private key. This account is read-only and can't place orders.");
     try {
       let bal;
-      if (client) { const { AssetType } = SDK(); bal = Number((await client.fetchBalanceAllowance({ assetType: AssetType.COLLATERAL })).balance) / 1e6; }
+      if (client) { bal = await fetchCollateralBalance(); }
       else bal = Number((await l2Fetch("GET", "/balance-allowance", { query: `asset_type=COLLATERAL&signature_type=${l2.walletType}` })).balance) / 1e6;
       state.balance = bal;
       add("Polymarket connection", true, client ? `Signed in as ${short(state.account.signer)}. Orders can be signed.` : "Polymarket accepted the signed balance request.");
@@ -464,6 +463,21 @@ window.BlueEdgeLive = (() => {
   async function cancelAll() {
     try { if (client) await client.cancelAll(); else await l2Fetch("DELETE", "/cancel-all"); refreshSoon(700); }
     catch (e) { throw new Error(friendly(e)); }
+  }
+
+  // Newer Polymarket SDK builds dropped client.fetchBalanceAllowance({assetType}) in favor of a no-arg
+  // client.fetchBalances() that returns every asset the account holds: [{asset:"COLLATERAL"|tokenId, balance, value}].
+  // Use the COLLATERAL row's `value` (already USD-denominated) so we don't have to guess whether `balance`
+  // is a raw micro-USDC integer or already scaled.
+  async function fetchCollateralBalance() {
+    const rows = await client.fetchBalances();
+    const arr = Array.isArray(rows) ? rows : rows?.data || [];
+    const c = arr.find(b => String(b?.asset).toUpperCase() === "COLLATERAL");
+    if (!c) return 0;
+    const v = Number(c.value);
+    if (Number.isFinite(v)) return v;
+    const b = Number(c.balance);
+    return Number.isFinite(b) ? (b > 1000 ? b / 1e6 : b) : 0; // fallback if `value` is ever missing
   }
 
   const isUnlocked = () => !!(client || l2);
