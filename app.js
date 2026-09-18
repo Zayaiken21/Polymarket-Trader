@@ -458,6 +458,41 @@
     catch (e) { toast(`Sell failed: ${e.message}`, "bad"); }
     finally { liveBusy = false; render(); }
   }
+  // bot-driven exit: same order shape as liveSell, but no confirm() dialog and its own short retry cooldown
+  // so a failed sell attempt doesn't get resubmitted every tick.
+  const exitTried = {};
+  async function liveSellAuto(token, shares, bid, reason) {
+    if (liveBusy || !(shares > 0) || Date.now() - (exitTried[token] || 0) < 8000) return;
+    exitTried[token] = Date.now();
+    liveBusy = true; render();
+    try {
+      await L.sell({ tokenId: token, shares, minPrice: Math.max(0.01, bid - S.RULES.slippage) });
+      toast(`Bot sold: ${reason}`, "good");
+    } catch (e) { toast(`Bot sell failed: ${e.message}`, "bad"); }
+    finally { liveBusy = false; render(); }
+  }
+  // The strategy's own exit rule (strategy.js: exitSignal) used to be dead code — the bot only ever opened
+  // trades and left every position to settle at expiry, whatever exitSignal said. This actually applies it,
+  // to every open position (bot-placed or opened by hand) while the bot is on, each tick.
+  function checkExits(now) {
+    for (const t of openTrades()) {
+      if (t.end <= now) continue; // let it settle naturally rather than race the resolver right at expiry
+      const bid = D.bookFor(t.token).bid;
+      const sig = S.exitSignal(strategy, { end: t.end }, t, { bid }, now);
+      if (sig.ok) paperSell(t.id, sig.reason);
+    }
+    if (isLive() && L.canTrade() && !liveBusy) {
+      const idx = tokenIndex();
+      for (const p of L.state.positions) {
+        const token = String(p.assetId ?? p.tokenId);
+        const hit = idx.get(token);
+        if (!hit || hit.m.end <= now) continue;
+        const bid = D.bookFor(token).bid ?? Number(p.currentPrice);
+        const sig = S.exitSignal(strategy, hit.m, { entry: Number(p.avgPrice), status: "open" }, { bid }, now);
+        if (sig.ok) liveSellAuto(token, Number(p.currentSize), bid, sig.reason);
+      }
+    }
+  }
 
   const buy = (m, side, source = "manual") => (isLive() ? liveBuy(m, side, source) : paperBuy(m, side, source));
 
@@ -474,9 +509,10 @@
     if (!isLeader()) return;
     settlePaper();
     if (!botOn) { botNote = ""; return; }
-    if (!strategy.timeframes.length) { botNote = "Turn on at least one timeframe."; return; }
     rollDay();
     const now = Date.now();
+    checkExits(now); // manage exits for every open position first, even if entries below are paused/off
+    if (!strategy.timeframes.length) { botNote = "Turn on at least one timeframe."; return; }
     const views = liveMarkets(now).map(m => vm(m, now));
 
     if (isLive()) {
@@ -986,8 +1022,11 @@
     const rows = [
       [s.gamma, "Polymarket markets", s.lastDiscovery ? `${s.gammaMsg}. Checked ${Math.round((now - s.lastDiscovery) / 1000)}s ago, ${perMin} request${perMin === 1 ? "" : "s"} in the last minute.` : s.gammaMsg || "Starting up"],
       [s.poly, "Polymarket order books", `${s.polyTokens} outcome prices streaming, with a REST refresh for any that go quiet.`],
-      [s.chainlink, "Chainlink prices (price to beat)", "Polymarket's live oracle feed that 5 and 15 minute markets resolve on."],
-      [D.state.ptbCheck?.checked ? (D.state.ptbCheck.matched === D.state.ptbCheck.checked ? "live" : "error") : "connecting", "Price to beat check", D.state.ptbCheck?.checked ? `${D.state.ptbCheck.matched} of ${D.state.ptbCheck.checked} captured prices matched Polymarket's official price to beat.` : "Compares each captured price with Polymarket's official value once Polymarket publishes it."],
+      [s.chainlink, "Polymarket oracle feed", "The Chainlink price feed that Polymarket itself resolves 5, 15 and 60 minute markets on."],
+      [D.state.ptbCheck?.checked ? (D.state.ptbCheck.matched < D.state.ptbCheck.checked ? "warn" : "live") : "connecting", "Polymarket price to beat",
+        D.state.ptbCheck?.checked
+          ? `Reconstructed in real time from Polymarket's own oracle feed for ${D.state.ptbCheck.checked} window${D.state.ptbCheck.checked === 1 ? "" : "s"} so far${D.state.ptbCheck.matched < D.state.ptbCheck.checked ? `; ${D.state.ptbCheck.checked - D.state.ptbCheck.matched} corrected once Polymarket published its own value` : ", confirmed against Polymarket's own value where published"}.`
+          : "Capturing Polymarket's oracle feed at each window's open — live markets will show a price to beat as soon as one opens."],
       [s.binance, "Binance feed", s.binanceHost ? `Using ${s.binanceHost}. Falls back to other Binance hosts automatically.` : "Starts once markets are found."],
       [L.isUnlocked() ? (L.canTrade() && L.state.stream !== "live" ? "connecting" : "live") : L.hasVault() ? "idle" : "offline", "Live account", L.isUnlocked() ? (L.canTrade() ? "L1 + L2 connected. Updates stream from Polymarket, with a backup refresh every 20 seconds." : "L2 read-only. Balance and orders refresh every 15 seconds.") : L.hasVault() ? "Saved and locked." : "Not connected."]
     ];

@@ -305,7 +305,9 @@ window.BlueEdgeData = (() => {
       if (!rtds.ws || rtds.ws.readyState > 1) { if (!rtds.timer) connectRtds(); }
       refreshStaleBooks();
       refreshPriceToBeat();
-      for (const m of state.markets.values()) if (m.start <= now && m.end > now && !official[m.id]?.open && !official[m.id]?.busy) { fetchOfficial(m); }
+      // Only ask the scraped endpoint for markets we can't already reconstruct ourselves from Chainlink —
+      // most live windows never need this call at all, which is most of the rate-limit budget saved.
+      for (const m of state.markets.values()) if (m.start <= now && m.end > now && !official[m.id]?.open && !official[m.id]?.busy && reconstructPTB(m) == null) { fetchOfficial(m); }
       if (now % 5000 < 1000) resolverTick();
     }, 1000);
     document.addEventListener("visibilitychange", () => {
@@ -705,11 +707,18 @@ window.BlueEdgeData = (() => {
     if (n.metaOpen) {
       o.gamma = true;
       const cap = captured[`${n.asset}:${n.tf}:${n.start}`];
-      if (cap != null && !state.ptbCheck.seen[n.id] && n.tf !== 60) {
-        state.ptbCheck.seen[n.id] = true; state.ptbCheck.checked++;
+      if (cap != null && n.tf !== 60) {
         const diff = Math.abs(cap - n.metaOpen);
         const tol = Math.max(0.01, n.metaOpen * 1e-4); // within 1 cent or 0.01%, whichever is larger — a real mismatch, not float/timing noise
-        if (diff <= tol) state.ptbCheck.matched++;
+        if (!state.ptbCheck.seen[n.id]) {
+          // markPtbSeen hadn't run for this market yet (Gamma's metadata beat our own capture) — count it now.
+          state.ptbCheck.seen[n.id] = true; state.ptbCheck.checked++;
+          if (diff <= tol) state.ptbCheck.matched++;
+        } else if (diff > tol) {
+          // Our real-time reconstruction was already counted as a tentative match; Polymarket's own
+          // published value now disagrees, so walk that tentative match back.
+          state.ptbCheck.matched = Math.max(0, state.ptbCheck.matched - 1);
+        }
         state.ptbCheck.worst = Math.max(state.ptbCheck.worst, diff);
         if (diff > tol) { captured[`${n.asset}:${n.tf}:${n.start}`] = n.metaOpen; saveCaptured(); }   // Polymarket's value wins
         emit("status");
@@ -802,17 +811,44 @@ window.BlueEdgeData = (() => {
     }
     return null;
   }
-  // "Price to beat" is Polymarket's own published number for the window — nothing else. Binance and
-  // Chainlink stay available elsewhere (the live-price readout, and as a last-resort background guess for
-  // whether a window has already resolved), but they never stand in for this field: showing a Binance or
-  // Chainlink number here — even correctly labelled — reads as "the price to beat" to someone deciding
-  // whether to trade, which it isn't. Until Polymarket actually publishes it, this returns "syncing" and
-  // nothing else, while fetchOfficial keeps asking in the background at the cadence set above.
+  // "Price to beat" is Polymarket's own reference price for the window. Polymarket doesn't publish a
+  // dedicated REST field for it (there is no documented "price to beat" endpoint), but for 5m/15m markets
+  // it settles on a time-weighted average of Polymarket's own Chainlink oracle feed in the seconds right
+  // before the window opens (30s lookback for 5m, 60s for 15m — see the LOOKBACK_MS comment above), and for
+  // longer windows on the first Chainlink tick at/after the open. Capturing that feed ourselves (captured[],
+  // twapBefore/chainlinkAt below) reproduces Polymarket's own number in real time, which is the whole point:
+  // waiting on Polymarket to publish it after the fact is both slower and — via the scraped
+  // polymarket.com/api/crypto/crypto-price endpoint below — much less reliable (no CORS headers, so it only
+  // works through third-party relay proxies that themselves rate-limit and occasionally go down; that's the
+  // "Price to beat check" status that used to sit stuck on "Connecting"). So: use our own Chainlink
+  // reconstruction as the primary, real-time source, and treat the scraped endpoint as a secondary
+  // confirmation/backfill (fetchOfficial), never something we block the UI or the bot on.
+  function reconstructPTB(m) {
+    if (LOOKBACK_MS[m.tf]) {
+      const key = `${m.asset}:${m.tf}:${m.start}`;
+      if (captured[key] != null) return captured[key];
+      const p = twapBefore(m.asset, m.start, LOOKBACK_MS[m.tf]);
+      if (p != null) { captured[key] = p; saveCaptured(); }
+      return p;
+    }
+    // Hourly (and any other non-TWAP) windows settle on a single oracle tick at the boundary, not a TWAP.
+    return chainlinkAt(m.asset, m.start);
+  }
+  function markPtbSeen(id) {
+    if (state.ptbCheck.seen[id]) return;
+    state.ptbCheck.seen[id] = true;
+    state.ptbCheck.checked++; state.ptbCheck.matched++; // nothing to disagree with yet; applyMeta corrects this if Polymarket's own value later disagrees
+    emitSoon("status", 200);
+  }
   function priceToBeat(m) {
     const now = Date.now();
     if (m.start > now) return { price: null, source: "", pending: true };
     const o = official[m.id];
-    if (o?.open > 0) return { price: o.open, source: "Polymarket", exact: true };
+    if (o?.open > 0) { markPtbSeen(m.id); return { price: o.open, source: "Polymarket", exact: true }; }
+    const cap = reconstructPTB(m);
+    if (cap != null) { markPtbSeen(m.id); return { price: cap, source: "Polymarket", exact: true }; }
+    // We don't have our own reconstruction yet (e.g. the app was opened mid-window, before any Chainlink
+    // ticks were captured) — fall back to asking Polymarket's own page for the number it already set.
     fetchOfficial(m);
     return { price: null, source: "", syncing: true };
   }
@@ -867,13 +903,13 @@ window.BlueEdgeData = (() => {
       // for a confirmed result, and it never touches the "price to beat" field itself.
       const ptb = priceToBeat(m);
       const key = `${m.asset}:${m.tf}:${m.start}`;
-      const cap = captured[key];
       if (ptb?.exact) {
+        // Estimate the close the same way we estimated the open (Polymarket's own Chainlink oracle feed),
+        // so both sides of the comparison come from one consistent source; Binance is only a fallback.
+        const close = LOOKBACK_MS[m.tf] ? twapBefore(m.asset, m.end, LOOKBACK_MS[m.tf]) : chainlinkAt(m.asset, m.end);
+        if (close != null) return setRes(m, close >= ptb.price ? "Up" : "Down", "Chainlink TWAP estimate", false);
         const c = await binanceClose(m);
         if (c != null) return setRes(m, c >= ptb.price ? "Up" : "Down", "Binance candle estimate", false);
-      } else if (cap != null) {
-        const c = twapBefore(m.asset, m.end, LOOKBACK_MS[m.tf] || 30000);
-        if (c != null) return setRes(m, c >= cap ? "Up" : "Down", "Chainlink TWAP estimate", false);
       } else {
         const c = await binanceClose(m), b = state.opens[key];
         if (b != null && c != null) return setRes(m, c >= b ? "Up" : "Down", "Binance candle estimate", false);
