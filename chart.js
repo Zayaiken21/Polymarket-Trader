@@ -302,35 +302,48 @@ window.BlueEdgeChart = (() => {
   function injectStyle() {
     if (document.getElementById("be-chart-tools-style")) return;
     const s = document.createElement("style"); s.id = "be-chart-tools-style";
+    // Every rule is scoped under the be- prefix (never a bare class like ".side" or ".active")
+    // and box/layout properties are !important, because this toolbar is injected into a host
+    // page whose own stylesheet we don't control and must never be shadowed or reshaped by it.
     s.textContent = `
-      .be-toolbar{position:absolute;z-index:5;display:flex;gap:4px;padding:5px;border-radius:12px;
-        background:rgba(12,20,30,.82);backdrop-filter:blur(8px);border:1px solid rgba(120,160,200,.18);
-        box-shadow:0 4px 16px rgba(0,0,0,.35);align-items:center}
-      .be-toolbar.side{right:10px;top:10px;flex-direction:column}
-      .be-toolbar button{width:32px;height:32px;display:flex;align-items:center;justify-content:center;
-        border:none;border-radius:8px;background:transparent;color:#8BA4BF;cursor:pointer;padding:0;flex:0 0 auto}
-      .be-toolbar button svg{width:16px;height:16px;pointer-events:none}
-      .be-toolbar button:active{background:rgba(120,160,200,.15)}
-      .be-toolbar button.active{background:#4DA3FF;color:#08131f}
-      .be-toolbar .be-sep{width:1px;align-self:stretch;background:rgba(120,160,200,.2);margin:2px}
-      .be-toolbar.side .be-sep{width:auto;height:1px}
-      .be-swatch{width:18px;height:18px;border-radius:50%;border:2px solid rgba(255,255,255,.5)}
+      .be-toolbar, .be-toolbar *{box-sizing:border-box !important}
+      .be-toolbar{position:absolute !important;z-index:5;display:flex !important;gap:4px;padding:5px;
+        border-radius:var(--radius,12px);background:var(--panel,#0E223B);background:rgba(12,20,30,.86);
+        backdrop-filter:blur(8px);border:1px solid var(--line-soft,rgba(120,160,200,.18));
+        box-shadow:0 4px 16px rgba(0,0,0,.35);align-items:center !important;max-width:calc(100% - 12px)}
+      .be-toolbar.be-rail{flex-direction:column !important;right:10px;top:10px;left:auto;bottom:auto;
+        max-height:calc(100% - 20px);overflow-y:auto;overscroll-behavior:contain}
+      .be-toolbar.be-dock{flex-direction:row !important;left:6px;right:6px;top:auto;
+        bottom:calc(8px + var(--safe-b,0px));overflow-x:auto;-webkit-overflow-scrolling:touch;
+        justify-content:flex-start !important;max-width:calc(100% - 12px)}
+      .be-toolbar button{all:unset;box-sizing:border-box !important;width:32px !important;height:32px !important;
+        min-width:32px !important;min-height:32px !important;flex:0 0 auto !important;display:flex !important;
+        align-items:center !important;justify-content:center !important;border-radius:8px;color:var(--muted,#8BA4BF);
+        cursor:pointer;touch-action:manipulation}
+      .be-toolbar.be-dock button{width:38px !important;height:38px !important;min-width:38px !important;min-height:38px !important}
+      .be-toolbar button svg{width:16px;height:16px;pointer-events:none;flex:none}
+      .be-toolbar button:active{background:rgba(120,160,200,.18)}
+      .be-toolbar button.be-active{background:var(--accent,#4DA3FF);color:var(--accent-ink,#08131f)}
+      .be-toolbar .be-sep{flex:0 0 auto !important;width:1px;align-self:stretch;background:rgba(120,160,200,.22);margin:2px}
+      .be-toolbar.be-dock .be-sep{width:0;height:0;margin:0;display:none}
+      .be-swatch{display:block;width:16px;height:16px;border-radius:50%;border:2px solid rgba(255,255,255,.55)}
       .be-text-input{position:absolute;z-index:6;min-width:40px;outline:none;font:600 13px sans-serif;
-        background:rgba(12,20,30,.7);border:1px dashed currentColor;border-radius:4px;padding:1px 4px}
-      @media (max-width:640px){
-        .be-toolbar{left:6px;right:6px;bottom:8px;top:auto;flex-direction:row;overflow-x:auto;
-          -webkit-overflow-scrolling:touch;justify-content:flex-start}
-        .be-toolbar button{width:38px;height:38px}
-        .be-toolbar .be-sep{display:none}
-      }
+        background:rgba(12,20,30,.75);border:1px dashed currentColor;border-radius:4px;padding:1px 4px}
     `;
     document.head.appendChild(s);
+  }
+  let layoutMq = null;
+  function applyLayout() {
+    if (!toolbarEl) return;
+    const dock = layoutMq ? layoutMq.matches : window.innerWidth <= 640;
+    toolbarEl.classList.toggle("be-dock", dock);
+    toolbarEl.classList.toggle("be-rail", !dock);
   }
   function icon(path) { return `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="${path}"/></svg>`; }
 
   function buildToolbar() {
     toolbarEl = document.createElement("div");
-    toolbarEl.className = "be-toolbar side";
+    toolbarEl.className = "be-toolbar";
     const mkBtn = (title, html, onClick) => {
       const b = document.createElement("button"); b.title = title; b.innerHTML = html;
       b.addEventListener("click", ev => { ev.stopPropagation(); onClick(); });
@@ -363,7 +376,7 @@ window.BlueEdgeChart = (() => {
     uiRoot.appendChild(toolbarEl);
     markActive();
   }
-  function markActive() { toolbarEl?.querySelectorAll("button[data-tool]").forEach(b => b.classList.toggle("active", b.dataset.tool === tool)); }
+  function markActive() { toolbarEl?.querySelectorAll("button[data-tool]").forEach(b => b.classList.toggle("be-active", b.dataset.tool === tool)); }
   function setTool(t) {
     if (tool !== t) { draft = null; hoverPt = null; }
     if (t !== "cursor") selectedId = null;
@@ -406,10 +419,18 @@ window.BlueEdgeChart = (() => {
     // ---- markup tools + mobile-friendly UI wiring ----
     injectStyle();
     if (getComputedStyle(el).position === "static") el.style.position = "relative";
-    el.style.touchAction = "pan-x pan-y";
+    // Deliberately NOT touching el's touch-action: the host page sets it to "none" on the chart
+    // host so the library (and our own pointer handlers) get raw, unhijacked touch gestures for
+    // pan/pinch/drawing. Overriding it here previously fought that and broke mobile gestures.
     uiRoot = el;
     try { drawPrimitive = new DrawingsPrimitive(); candles.attachPrimitive(drawPrimitive); } catch {}
     buildToolbar();
+    if (!layoutMq && window.matchMedia) {
+      layoutMq = window.matchMedia("(max-width: 640px)");
+      const onChange = () => applyLayout();
+      layoutMq.addEventListener ? layoutMq.addEventListener("change", onChange) : layoutMq.addListener(onChange);
+    }
+    applyLayout();
     el.addEventListener("pointerdown", onPointerDown);
     el.addEventListener("pointermove", onPointerMove);
     window.addEventListener("pointerup", onPointerUp);
