@@ -26,7 +26,7 @@
   let mode = read(K.mode, "paper") === "live" ? "live" : "paper";
   const IV_TO_TF = { "1m": 5, "3m": 5, "5m": 5, "15m": 15, "30m": 60, "1h": 60, "2h": 60, "4h": 60, "6h": 60, "8h": 60, "12h": 60, "1d": 60, "3d": 60, "1w": 60, "1M": 60 };
   const ui = { homeTf: "all", marketsTf: "all", marketsWhen: "live", chartCoin: "BTC", chartInterval: "15m", chartPtbTf: 15, chartMarket: null, ...read(K.ui, {}) };
-  let botNote = "", view = "home", liveBusy = false, installBannerCheck = null;
+  let botNote = "", view = "home", liveBusy = false;
   const offered = new Set();
 
   const reloadBook = () => { account = loadAccount(); trades = read(K.trades, []); };
@@ -78,7 +78,7 @@
   function vm(m, now = Date.now()) {
     const ub = D.bookFor(m.upToken), db = D.bookFor(m.downToken);
     const ptb = D.priceToBeat(m), lp = D.livePrice(m);
-    const ctx = { now, up: { bid: ub.bid ?? null, ask: ub.ask ?? null }, down: { bid: db.bid ?? null, ask: db.ask ?? null }, open: ptb?.exact ? ptb.price : null, shownOpen: ptb?.exact ? ptb.price : null, openExact: !!ptb?.exact, openSource: ptb?.exact ? (ptb.source || "") : "", spot: lp?.price ?? null, spotSource: lp?.source || "" };
+    const ctx = { now, up: { bid: ub.bid ?? null, ask: ub.ask ?? null }, down: { bid: db.bid ?? null, ask: db.ask ?? null }, open: ptb?.exact ? ptb.price : null, shownOpen: ptb?.exact ? ptb.price : (ptb?.estPrice ?? null), openExact: !!ptb?.exact, openSource: ptb?.exact ? (ptb.source || "") : (ptb?.estSource || ""), spot: lp?.price ?? null, spotSource: lp?.source || "" };
     const um = mid(ctx.up), dm = mid(ctx.down);
     return {
       m, ctx, decision: S.evaluate(strategy, m, ctx), res: D.resolutionFor(m.id),
@@ -362,7 +362,7 @@
     if (cost + fee > account.cash + 1e-9) return fail("Not enough paper cash.");
     account.cash -= cost + fee;
     trades.push({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 7), marketId: m.id, slug: m.slug, url: m.url, asset: m.asset, tf: m.tf, start: m.start, end: m.end, side, outcome: side === "Up" ? m.upLabel : m.downLabel, token, upToken: m.upToken, resolutionSource: m.resolutionSource || "", feeRate: m.feeRate, entry: ask, shares, cost, fee, openedAt: Date.now(), status: "open", source });
-    saveAccount(); saveTrades(); watchOpen(); syncChartToMarket(m);
+    saveAccount(); saveTrades(); watchOpen();
     toast(`${source === "bot" ? "Bot bought" : "Bought"} ${shares.toFixed(2)} ${side} on ${m.asset} ${tfShort(m.tf)} at ${cents(ask)} (paper)`, "good");
     render();
     return { ok: true };
@@ -441,7 +441,6 @@
     try {
       const res = await L.buy({ tokenId: token, usd: stake, maxPrice: ask + S.RULES.slippage });
       toast(`${source === "bot" ? "Bot placed" : "Placed"} live buy: ${side} on ${m.asset} ${tfShort(m.tf)} for up to ${money(stake)} (${res?.status || "sent"}).`, "good");
-      syncChartToMarket(m);
       return { ok: true };
     } catch (e) {
       toast(`Live order failed: ${e.message}`, "bad");
@@ -531,18 +530,8 @@
       if (account.botMode === "ask") return offer(ready);
       const stake = S.stake(strategy, L.equity());
       if ((L.state.balance ?? 0) < Math.max(1, stake)) { botNote = `Paused: cash ${money(L.state.balance)} is below your ${money(stake)} stake.`; return; }
-      // Several markets can match in the same tick (e.g. a handful of 5m windows opening together). Placing
-      // only one and waiting for the next 2s tick risked losing the rest to the window closing or the odds
-      // moving. Work through the matches in this same tick instead, up to the open slots and cash on hand,
-      // with a short pause between orders so we still send them one at a time rather than in a burst.
-      let slots = strategy.maxOpen - openCount, cashLeft = L.state.balance ?? 0, placed = 0, lastMsg = "";
-      for (const v of ready) {
-        if (slots <= 0 || cashLeft < Math.max(1, stake)) break;
-        const r = await liveBuy(v.m, v.decision.side, "bot");
-        if (r.ok) { slots--; cashLeft -= stake; placed++; } else lastMsg = `Skipped ${v.m.asset}: ${r.msg}`;
-        if (slots > 0 && cashLeft >= Math.max(1, stake) && ready.indexOf(v) < ready.length - 1) await new Promise(res => setTimeout(res, 700));
-      }
-      botNote = placed ? `Placed ${placed} live order${placed > 1 ? "s" : ""}.` : lastMsg;
+      const r = await liveBuy(ready[0].m, ready[0].decision.side, "bot");
+      botNote = r.ok ? `Placed a live order on ${ready[0].m.asset} ${tfShort(ready[0].m.tf)}.` : `Skipped ${ready[0].m.asset}: ${r.msg}`;
       return;
     }
 
@@ -751,16 +740,6 @@
   }
 
   /* chart page */
-  // Point the chart (coin, blue "to beat" line and candle interval) at a specific market. Used both when the
-  // person taps "Chart" from a market sheet and, below, right after a trade opens — so the blue line always
-  // follows whatever asset/window you're actually holding instead of whatever coin the chart happened to be
-  // showing before.
-  function syncChartToMarket(m) {
-    if (!m) return;
-    ui.chartCoin = m.asset; ui.chartPtbTf = m.tf; chartLineKey = "";
-    ui.chartInterval = { 5: "1m", 15: "1m", 60: "5m" }[m.tf] || ui.chartInterval;
-    saveUi();
-  }
   let chartMounted = false;
   function chartCoins() {
     const order = ["BTC", "ETH", "SOL", "XRP"];
@@ -804,7 +783,7 @@
     const tf = Number(ui.chartPtbTf) || 5, now = Date.now();
     const m = D.markets().find(x => x.asset === ui.chartCoin && x.tf === tf && x.start <= now && x.end > now);
     const ptb = m ? D.priceToBeat(m) : null;
-    const shown = ptb?.exact ? ptb.price : null;
+    const shown = ptb?.exact ? ptb.price : (ptb?.estPrice ?? null);
     const isEst = !ptb?.exact && shown != null;
     const key = m && shown != null ? `${m.id}:${shown}:${isEst ? "est" : "final"}` : "";
     if (key === chartLineKey) return;
@@ -1079,7 +1058,6 @@
     if (view === "chart" && prev !== "chart" && chartMounted) C.resume();
     closeSheet(); window.scrollTo(0, 0);
     if (isLive() && L.isUnlocked() && (view === "trades" || view === "home")) L.refresh(false);
-    installBannerCheck?.();
     draw();
   }
 
@@ -1152,8 +1130,9 @@
       case "sheet-chart": {
         if (!sheet) return;
         const m = D.state.markets.get(sheet.id);
-        syncChartToMarket(m);
-        closeSheet(); location.hash = "#chart"; return;
+        ui.chartCoin = m.asset; ui.chartPtbTf = m.tf; chartLineKey = "";
+        ui.chartInterval = { 5: "1m", 15: "1m", 60: "5m" }[m.tf] || ui.chartInterval;
+        saveUi(); closeSheet(); location.hash = "#chart"; return;
       }
       case "import-account": return $("#accountFile").click();
       case "export-account": try { const n = L.exportFile(); toast(`Saved ${n} encrypted account${n === 1 ? "" : "s"} to a JSON file on this device.`, "good"); } catch (err) { toast(err.message, "bad"); } return;
@@ -1331,56 +1310,36 @@
   C.onUpdate(() => applyChartLine());
 
   /* ---------- Add to Home Screen ---------- */
-  // Home-page-only, and re-offered on a 10s-every-12h cadence: a fixed-position banner (see .install-banner
-  // in styles.css) that sits above the routed views, so without this gate it showed on every tab. The 12h
-  // cadence only re-shows OUR OWN banner (a localStorage timestamp check) — it never calls the browser's
-  // native deferredPrompt.prompt() on a timer, only on an explicit tap of "Add". That native prompt is a
-  // separate, one-shot thing the browser itself is stingy about (Chrome stops firing beforeinstallprompt for
-  // a long while after a couple of dismissals), so re-prompting it automatically is exactly the kind of thing
-  // that would burn through that allowance for no reason — our repeat popups never touch it.
   (function initInstallBanner() {
     const banner = $("#installBanner"), text = $("#installBannerText"), goBtn = $("#installBannerGo"), closeBtn = $("#installBannerClose");
     if (!banner) return;
-    const LAST_SHOWN_KEY = "blueedge.installLastShown";
-    const SHOW_MS = 10000, EVERY_MS = 12 * 3600000; // visible 10s, offered at most once every 12h
-    const isStandalone = () => window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true;
-    if (isStandalone()) return; // already installed: never show, nothing else to wire up
+    const DISMISS_KEY = "blueedge.installDismissedAt";
+    const isStandalone = window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true;
+    if (isStandalone) return;
+    const dismissedAt = Number(localStorage.getItem(DISMISS_KEY) || 0);
+    if (Date.now() - dismissedAt < 14 * 24 * 3600000) return; // don't nag more than once every 2 weeks
+    let hideTimer = null;
+    const hide = () => { banner.hidden = true; clearTimeout(hideTimer); };
+    const show = msg => { text.textContent = msg; banner.hidden = false; clearTimeout(hideTimer); hideTimer = setTimeout(hide, 10000); };
+    closeBtn.addEventListener("click", () => { localStorage.setItem(DISMISS_KEY, String(Date.now())); hide(); });
+
+    let deferredPrompt = null;
+    window.addEventListener("beforeinstallprompt", e => {
+      e.preventDefault(); deferredPrompt = e; goBtn.style.display = "";
+      show("Install BlueEdge as an app on this device.");
+    });
+    goBtn.addEventListener("click", async () => {
+      if (!deferredPrompt) return hide();
+      deferredPrompt.prompt();
+      const { outcome } = await deferredPrompt.userChoice;
+      deferredPrompt = null; hide();
+      if (outcome === "accepted") localStorage.setItem(DISMISS_KEY, String(Date.now()));
+    });
 
     const ua = navigator.userAgent;
     const isIOS = /iphone|ipad|ipod/i.test(ua) && !window.MSStream;
     const isSafari = isIOS && /safari/i.test(ua) && !/crios|fxios|opios/i.test(ua);
-    if (isIOS && isSafari) goBtn.style.display = "none"; // no native prompt exists on iOS Safari; the button would do nothing
-
-    let deferredPrompt = null, hideTimer = null;
-    const hide = () => { banner.hidden = true; clearTimeout(hideTimer); hideTimer = null; };
-    const canOffer = () => (isIOS && isSafari) || !!deferredPrompt;
-    function maybeShow() {
-      if (isStandalone()) return hide();
-      if (view !== "home") return hide();               // home page only
-      if (hideTimer) return;                              // already mid-way through a showing
-      if (!canOffer()) return;                            // Android/Chrome hasn't told us it's installable yet
-      const last = Number(localStorage.getItem(LAST_SHOWN_KEY) || 0);
-      if (Date.now() - last < EVERY_MS) return;           // not due yet
-      localStorage.setItem(LAST_SHOWN_KEY, String(Date.now()));
-      text.textContent = (isIOS && isSafari) ? 'Tap Share, then "Add to Home Screen" to install BlueEdge.' : "Install BlueEdge as an app on this device.";
-      banner.hidden = false;
-      hideTimer = setTimeout(hide, SHOW_MS);
-    }
-
-    closeBtn.addEventListener("click", hide); // just closes this showing early; it'll offer again in 12h
-    goBtn.addEventListener("click", async () => {
-      if (!deferredPrompt) return hide();
-      hide();
-      deferredPrompt.prompt();
-      const { outcome } = await deferredPrompt.userChoice;
-      deferredPrompt = null;
-      if (outcome === "accepted") localStorage.setItem(LAST_SHOWN_KEY, String(Date.now() + 100 * 365 * 24 * 3600000)); // installed: stop offering
-    });
-
-    window.addEventListener("beforeinstallprompt", e => { e.preventDefault(); deferredPrompt = e; goBtn.style.display = ""; maybeShow(); });
-    installBannerCheck = maybeShow;
-    setInterval(maybeShow, 60000); // catches the 12h mark even if the person never changes tabs
-    maybeShow();
+    if (isIOS && isSafari) { goBtn.style.display = "none"; show('Tap Share, then "Add to Home Screen" to install BlueEdge.'); }
 
     if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
   })();
