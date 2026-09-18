@@ -78,7 +78,7 @@
   function vm(m, now = Date.now()) {
     const ub = D.bookFor(m.upToken), db = D.bookFor(m.downToken);
     const ptb = D.priceToBeat(m), lp = D.livePrice(m);
-    const ctx = { now, up: { bid: ub.bid ?? null, ask: ub.ask ?? null }, down: { bid: db.bid ?? null, ask: db.ask ?? null }, open: ptb?.exact ? ptb.price : null, shownOpen: ptb?.exact ? ptb.price : (ptb?.estPrice ?? null), openExact: !!ptb?.exact, openSource: ptb?.exact ? (ptb.source || "") : (ptb?.estSource || ""), spot: lp?.price ?? null, spotSource: lp?.source || "" };
+    const ctx = { now, up: { bid: ub.bid ?? null, ask: ub.ask ?? null }, down: { bid: db.bid ?? null, ask: db.ask ?? null }, open: ptb?.exact ? ptb.price : null, shownOpen: ptb?.exact ? ptb.price : null, openExact: !!ptb?.exact, openSource: ptb?.exact ? (ptb.source || "") : "", spot: lp?.price ?? null, spotSource: lp?.source || "" };
     const um = mid(ctx.up), dm = mid(ctx.down);
     return {
       m, ctx, decision: S.evaluate(strategy, m, ctx), res: D.resolutionFor(m.id),
@@ -804,7 +804,7 @@
     const tf = Number(ui.chartPtbTf) || 5, now = Date.now();
     const m = D.markets().find(x => x.asset === ui.chartCoin && x.tf === tf && x.start <= now && x.end > now);
     const ptb = m ? D.priceToBeat(m) : null;
-    const shown = ptb?.exact ? ptb.price : (ptb?.estPrice ?? null);
+    const shown = ptb?.exact ? ptb.price : null;
     const isEst = !ptb?.exact && shown != null;
     const key = m && shown != null ? `${m.id}:${shown}:${isEst ? "est" : "final"}` : "";
     if (key === chartLineKey) return;

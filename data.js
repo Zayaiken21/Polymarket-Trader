@@ -848,13 +848,8 @@ window.BlueEdgeData = (() => {
     const cap = reconstructPTB(m);
     if (cap != null) { markPtbSeen(m.id); return { price: cap, source: "Polymarket", exact: true }; }
     // We don't have our own reconstruction yet (e.g. the app was opened mid-window, before any Chainlink
-    // ticks were captured, or the feed had a brief gap right at the boundary) — fall back to asking
-    // Polymarket's own page for the number it already set. That can take a few seconds (or, if every relay
-    // is down, never arrive), so in the meantime show the current live price as a clearly-marked estimate
-    // instead of leaving the "to beat" line blank for the rest of the window.
+    // ticks were captured) — fall back to asking Polymarket's own page for the number it already set.
     fetchOfficial(m);
-    const lp = livePrice(m);
-    if (lp?.price > 0) return { price: null, estPrice: lp.price, estSource: lp.source, source: "", syncing: true };
     return { price: null, source: "", syncing: true };
   }
   function livePrice(m) {
